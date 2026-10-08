@@ -105,6 +105,47 @@ for(const browser of [false,true]){
     const before=structuredClone(f.intents.get(f.base));await assert.rejects(f.run(),/admission unknown/);
     assert.equal(f.calls.at(-1).operation,'datasets.upload.admission.status');assert.deepEqual(f.intents.get(f.base),before);
   });
+  test(`${client}: authoritative absence permits one same-intent create only on a later explicit upload`,async()=>{
+    const f=fixture(browser);let available=false,creates=0;const calls=[];
+    const call=async(op,args)=>{
+      calls.push({op,args});
+      if(op==='datasets.upload.admission.create'){
+        creates++;if(!available)throw Object.assign(Error('warehouse not writable'),{status:503});
+      }
+      if(op==='datasets.upload.admission.status'&&!available)
+        throw Object.assign(Error('not admitted'),{status:404,code:'DATASET_ADMISSION_ABSENT'});
+      // The first status of an explicit retry still proves the old intent
+      // absent; only its following create may allocate the single server UUID.
+      if(op==='datasets.upload.admission.status'&&creates===1)
+        throw Object.assign(Error('not admitted'),{status:404,code:'DATASET_ADMISSION_ABSENT'});
+      return f.directCall(op,args);
+    };
+    const options=browser?{admissionCall:call}:{call};
+    await assert.rejects(f.run(options),error=>error.code==='DATASET_ADMISSION_ABSENT'&&/warehouse not writable/.test(error.message));
+    assert.equal(creates,1);assert.equal(f.intents.get(f.base).uploadId,undefined);
+    available=true;assert.equal((await f.run(options)).state,'READY');assert.equal(creates,2);
+    assert.deepEqual(calls.filter(value=>value.op==='datasets.upload.admission.create').map(value=>value.args.key),[f.base,f.base]);
+    assert.equal(f.calls.filter(value=>value.operation==='datasets.upload.begin').length,1);
+  });
+  test(`${client}: gateway 404, wrong code/status and ambiguous retry never authorize reallocation`,async()=>{
+    for(const absent of [{status:404},{status:503,code:'DATASET_ADMISSION_ABSENT'},{status:404,code:'other'}]){
+      const f=fixture(browser),calls=[];
+      f.intents.set(f.base,{protocol:1,userId,machine,key:f.base,specification:f.spec});
+      const call=async(op,args)=>{calls.push({op,args});throw Object.assign(Error('unconfirmed'),absent);};
+      await assert.rejects(f.run(browser?{admissionCall:call}:{call}),/unconfirmed/);
+      assert.deepEqual(calls.map(value=>value.op),['datasets.upload.admission.status']);
+    }
+    const f=fixture(browser);f.intents.set(f.base,{protocol:1,userId,machine,key:f.base,specification:f.spec});
+    const calls=[];let read=0;
+    const call=async(op,args)=>{
+      calls.push({op,args});
+      if(op==='datasets.upload.admission.status'&&++read===1)throw Object.assign(Error('absent'),{status:404,code:'DATASET_ADMISSION_ABSENT'});
+      throw Error('reply lost');
+    };
+    await assert.rejects(f.run(browser?{admissionCall:call}:{call}),/reply lost/);
+    assert.deepEqual(calls.map(value=>value.op),['datasets.upload.admission.status','datasets.upload.admission.create','datasets.upload.admission.status']);
+    assert.equal(f.intents.get(f.base).key,f.base);assert.equal(f.intents.get(f.base).uploadId,undefined);
+  });
   test(`${client}: initial, assigned-UUID and begin-attempt persistence failures all refuse begin`,async()=>{
     for(const failAt of [1,2,3]){
       const f=fixture(browser),save=f.store.setIntent;let count=0;

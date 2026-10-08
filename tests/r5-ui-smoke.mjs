@@ -14,6 +14,7 @@ import {accountMenu,closeSubmit,openSubmit,refreshVisible} from './starbase-work
 import {guardedRoute} from './browser-route-guard.mjs';
 import {freezeR5Clock,readMissionGeometry,assertMissionGeometry} from './r5-fixture-tools.mjs';
 import {runR5FixtureRegression} from './r5-fixture-regression.mjs';
+import {projectFootprint,trainingPlan,trainingSource} from './training-storage-fixture.mjs';
 
 const temp=await mkdtemp(join(tmpdir(),'r5-work-browser-'));
 const shots=process.env.UI_SCREENSHOTS||'/tmp/r5-ui-smoke';
@@ -41,7 +42,7 @@ async function datasetDetail(page,dataset){
   if(!await row.isVisible()&&await page.locator('[data-v3-back]').isVisible())await page.locator('[data-v3-back]').click();
   await row.click();await page.locator('#warehouse-inspector .v3-train').waitFor();
 }
-const project={project:'vision-baseline',state:'READY',environmentMode:'shared',latestReadyRelease:release,releases:[{release,state:'READY'}]};
+const project={project:'vision-baseline',state:'READY',environmentMode:'oci',latestReadyRelease:release,releases:[{release,state:'READY'}]};
 const status=()=>({version:1,checkedAt:new Date().toISOString(),hosts:MACHINES.map((machine,position)=>({id:machine.id,checkedAt:new Date().toISOString(),reachable:position!==2,
   gpus:position===2?[]:Array.from({length:machine.cards},(_,index)=>({index,memoryTotalMiB:(Number.parseFloat(machine.memory)||32)*1024,memoryUsedMiB:index<2?16384:0,processesAvailable:true,processes:index<2?[{pid:1000+index,memoryUsedMiB:16384}]:[]})),
   gpuq:{connected:position!==2,health:position===2?'unknown':'ok',observeOnly:position===1,schedulableIndices:[0],jobs:[],capabilities:['priority-policy-v1','console-yield-v1','console-elastic-v1','console-placement-v1','console-sharing-v1','console-hami-v1','console-hami-sm-v1']}}))});
@@ -53,6 +54,13 @@ try{
     if(operation==='projects.list')return {projects:[structuredClone(project)]};
     if(operation==='projects.verify')return {project:args.project,release:args.release,state:'READY'};
     if(operation==='projects.status')return structuredClone(project);
+    if(operation==='projects.copy.probe'){
+      assert.equal(args.project,project.project);assert.equal(args.release,release);
+      return {protocol:'portable-project-v1',enabled:true,environmentMode:'oci',architecture:'amd64',
+        project:args.project,release:args.release,image:'sha256:'+'b'.repeat(64),releaseReady:true,sources:[machine],...projectFootprint};
+    }
+    if(operation==='storage.training.plan'){assert.equal(args.hostAdmin,false);return trainingPlan(machine,args);}
+    if(operation==='datasets.training.status'){assert.equal(args.hostAdmin,false);return trainingSource(machine,args,{bytes:args.dataset==='scans'?7*1024**3:2048,files:args.dataset==='scans'?120:1,directories:0});}
     if(operation==='datasets.list'){
       assert.deepEqual(args,{userId:'builtin-admin',hostAdmin:true},'catalog discovery has a fixed metadata-only principal');
       assert.equal(datasetOwners.length,2,'fixture data grants belong to actual member and admin accounts');
@@ -175,11 +183,15 @@ try{
   await closeSubmit(desktop);await desktop.locator('[name=workspace-project]').selectOption('');await openSubmit(desktop);assert.equal(await desktop.locator('#train-form [type=submit]').isDisabled(),true,'parsed destination does not silently change');await desktop.locator('#clear-training-prefill').click();assert.equal(await desktop.locator('#train-form [type=submit]').isEnabled(),true);await closeSubmit(desktop);
   // Free fixture reservations only by confirmed scheduler states; no real task runs.
   for(const row of rows)if(row.id!==running.id&&!['FAILED','SUCCEEDED'].includes(row.state))row.state='SUCCEEDED';service.save();await refreshVisible(desktop);
-  await desktop.locator('[name=workspace-project]').selectOption(project.project);await openSubmit(desktop);await desktop.locator('#train-form [name=name]').fill('receipt-local');
+  await desktop.locator('[name=workspace-project]').selectOption(project.project);await openSubmit(desktop);
+  // This receipt/maintenance case intentionally targets one fixed machine.
+  // AUTO placement has its own tests and must not change the scope here.
+  await desktop.locator('#train-form [name=training-target]').selectOption('current');
+  await desktop.locator('#train-form [name=name]').fill('receipt-local');
   let lost=true;const submitRequests=[];
   const loseReply=guardedRoute(async route=>{const body=route.request().postDataJSON();if(body?.operation==='jobs.submit'){submitRequests.push(structuredClone(body.args));const response=await route.fetch();assert.equal(response.status(),200,await response.text());if(lost){lost=false;await route.abort('failed');}else await route.fulfill({response});}else await route.fallback();});
   await desktop.route('**/api/call',loseReply);await desktop.locator('#train-form [type=submit]').click();await desktop.locator('[data-receipt-retry]').waitFor({state:'visible'});await desktop.waitForFunction(()=>!document.querySelector('[data-receipt-retry]').disabled);
-  const persisted=service.store.jobs.filter(row=>row.name==='receipt-local');assert.equal(persisted.length,1);assert.match(await desktop.locator('#submit-summary').innerText(),/待确认/);await capture(desktop,'r5-submit-unconfirmed-1440',true);
+  const persisted=service.store.jobs.filter(row=>row.name==='receipt-local');assert.equal(persisted.length,1);assert.equal(submitRequests[0].machine,targetMachine);assert.match(await desktop.locator('#submit-summary').innerText(),/待确认/);await capture(desktop,'r5-submit-unconfirmed-1440',true);
   const maintenanceState=(await service.invoke(admin.token,'maintenance.status',{})).result;
   const paused=(await service.invoke(admin.token,'maintenance.set',{scope:targetMachine,enabled:true,reason:'本地验收：暂停提交',revision:maintenanceState.revision})).result;
   await refreshVisible(desktop);await desktop.waitForFunction(()=>document.querySelector('#submit-summary')?.textContent.includes('维护中'));assert.equal(await desktop.locator('[data-receipt-retry]').isDisabled(),true);assert.equal(submitRequests.length,1,'maintenance cannot retry an unresolved submission');
@@ -262,7 +274,10 @@ try{
       else assert.equal(await panel.locator('[data-v3-cache="'+targetMachine+'"]').isEnabled(),true);
       const facts=await panel.locator('.v3-server').evaluateAll(nodes=>nodes.map(node=>{const name=node.querySelector('.v3-server-text'),glyph=node.querySelector('.v3-g'),r=name.getBoundingClientRect(),g=glyph.getBoundingClientRect(),text=node.querySelector('.v3-server-text>span');return {centred:Math.abs(r.y+r.height/2-g.y-g.height/2)<=1,caption:text.textContent.trim(),stateHeight:text.getBoundingClientRect().height,line:parseFloat(getComputedStyle(text).lineHeight),nowrap:getComputedStyle(text).whiteSpace==='nowrap'};}));assert.ok(facts.every(row=>row.centred&&(row.caption?row.nowrap&&Number.isFinite(row.line)&&row.stateHeight<=row.line+1:row.stateHeight===0)),'server facts remain aligned and readable: '+JSON.stringify({role,width,dataset,facts}));
       assert.ok(await panel.evaluate(node=>node.scrollWidth<=node.clientWidth+1),'detail has no horizontal overflow');
-      if(width<760){for(const action of await panel.locator('button:visible').all())assert.ok(await action.evaluate(node=>node.getBoundingClientRect().height>=44),'mobile detail actions retain distinct 44px targets');}
+      if(width<760){for(const action of await panel.locator('button:visible').all()){
+        const target=await action.evaluate(node=>({text:node.textContent.trim(),height:node.getBoundingClientRect().height}));
+        assert.ok(target.height>=44,'mobile detail actions retain distinct 44px targets: '+JSON.stringify({role,width,dataset,...target}));
+      }}
       const targets=await panel.locator('button:visible,select:visible,summary:visible,a[href]:visible').evaluateAll(nodes=>nodes.map(node=>({name:node.textContent.trim()||node.getAttribute('aria-label'),width:node.getBoundingClientRect().width,height:node.getBoundingClientRect().height})));
       assert.ok(targets.length>0&&targets.every(node=>node.width>=44&&node.height>=44),'all default and mobile detail targets are at least 44px: '+JSON.stringify({role,width,dataset,targets}));
     }

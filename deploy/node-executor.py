@@ -1,6 +1,7 @@
 #!/usr/bin/python3
 """Forced command. Fixed GPUQ wrapper; user commands only run inside the sandbox."""
 import base64, fcntl, hashlib, importlib.util, json, math, os, re, select, sqlite3, stat, subprocess, sys, socket, tempfile, time, uuid
+sys.dont_write_bytecode=True  # Immutable cohorts must retain their exact file manifest.
 from pathlib import Path
 from contextlib import closing
 from types import SimpleNamespace
@@ -15,6 +16,7 @@ DATASET_ID=re.compile(r'^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$')
 DATASET_VERSION=re.compile(r'^[a-f0-9]{64}$')
 DATASET_MODULE=None
 DATASET_UPLOADS=None
+TRAINING_DATASET_UPLOADS=None
 DATA_WORKSPACES=None
 DATA_IMPORTS=None
 CLOUD_FILES=None
@@ -25,6 +27,7 @@ STORAGE_AUTHORITY_MODULE=None
 STORAGE_ARCHIVE=None
 STORAGE_LEASES=None
 STORAGE_WAREHOUSE=None
+DATASET_TRAINING_SOURCES=None
 ADMIN_COMMAND=None
 HOST_COMMAND_CAPABILITY='host-command-v1'
 DATASET_DELETE_CAPABILITY='dataset-delete-v1'
@@ -211,19 +214,33 @@ def dataset_cache():
 
 
 def dataset_cache_admission(needed_bytes=0, *, _exclude=()):
-    """Private detached-worker preflight; not a public collection endpoint.
+    """Private no-delete preflight; explicit administrative collection is separate.
 
-    Reclaim at most sixteen authenticated idle copies before a new preparation.
-    The following cache admission still rechecks its live budget/free space
-    under the cache lock. Never collect while holding that lock or lease locks.
-    A dataset larger than the trusted SSD budget is rejected before any GC.
+    This check never treats reclaimable bytes as free. Publication still performs
+    its atomic live budget/reservation checks; no preparation implicitly evicts
+    another user's copy to make room, including detached peer/warehouse workers.
     """
     module,cache=dataset_cache()
     if type(needed_bytes) is not int or not 0<=needed_bytes<=2**63-1:raise ValueError('Invalid cache preparation footprint')
     if cache.budget_bytes is None:return {'enabled':False,'state':'DISABLED'}
     if needed_bytes>cache.budget_bytes:
         raise ValueError(f'Dataset exceeds cache budget: requestedBytes={needed_bytes}, budgetBytes={cache.budget_bytes}; keep the original in the data warehouse')
-    return storage_node().tier.collect(module.Principal('builtin-admin',True),dry_run=False,needed_bytes=needed_bytes,max_versions=16,_exclude=_exclude)
+    if not isinstance(_exclude,tuple) or len(_exclude)>1:raise ValueError('Invalid cache admission exclusion')
+    except_stage=None
+    if _exclude:
+        dataset,version=_exclude[0]
+        module._identifier(dataset);module._identifier(version,module.HASH_RE)
+        if needed_bytes:except_stage=cache._paths(dataset,version)['.staging']
+    with cache._locked():
+        cache._budget(needed_bytes,except_stage=except_stage)
+        additional=needed_bytes
+        if except_stage is not None and cache._version_entry_exists(except_stage):
+            # Existing stage remaining bytes are already in _reserved; written
+            # payload already reduced kernel free space. Never charge it twice.
+            transfer=cache._transfer(except_stage)
+            additional=max(0,needed_bytes-transfer['totalBytes'])
+        cache._free(cache._reserved()+additional)
+    return {'enabled':True,'state':'CHECKED','reclaimedBytes':0}
 
 
 def dataset_rebuild_guard(actor,dataset,version):
@@ -271,6 +288,20 @@ def dataset_uploads():
     dataset_mount_check(DATASET_UPLOADS.n.CONFIG['datasets'])
     return DATASET_UPLOADS
 
+
+def dataset_training_uploads():
+    """Private fixed-cache adapter; public uploads always keep HDD ingress."""
+    global TRAINING_DATASET_UPLOADS
+    warehouse=storage_warehouse()
+    if warehouse is None:
+        raise ValueError('A separate warehouse/cache is not configured')
+    dataset_mount_check(CONFIG['datasets'])
+    if TRAINING_DATASET_UPLOADS is None:
+        spec=importlib.util.spec_from_file_location('gpuq_training_dataset_upload',HERE/'dataset-upload.py')
+        module=importlib.util.module_from_spec(spec);sys.modules[spec.name]=module;spec.loader.exec_module(module)
+        TRAINING_DATASET_UPLOADS=module.DatasetUploads(warehouse.cache_view)
+    return TRAINING_DATASET_UPLOADS
+
 def data_workspaces():
     global DATA_WORKSPACES
     if DATA_WORKSPACES is None:
@@ -313,6 +344,26 @@ def dataset_refs(job):
         seen.add(alias)
     return refs
 
+def dataset_read_mode(job):
+    mode=job.get('datasetReadMode','cache')
+    if not isinstance(mode,str) or mode not in ('cache','warehouse'):raise ValueError('Invalid immutable dataset read mode')
+    if mode=='warehouse' and not dataset_refs(job):raise ValueError('Warehouse training requires fixed dataset versions')
+    return mode
+
+def dataset_training_sources():
+    global DATASET_TRAINING_SOURCES
+    if DATASET_TRAINING_SOURCES is None:
+        spec=importlib.util.spec_from_file_location('gpuq_training_dataset_sources',HERE/'dataset-training-source.py')
+        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        DATASET_TRAINING_SOURCES=module.TrainingSources(sys.modules[__name__] if __name__ in sys.modules else SimpleNamespace(**globals()))
+    return DATASET_TRAINING_SOURCES
+
+def dataset_training_cache(job):
+    if dataset_read_mode(job)=='cache':return dataset_cache()
+    base={'id':job['id'],'userId':job['userId'],'references':dataset_refs(job)}
+    sources=dataset_training_sources()
+    return sources.cache(sources.binding(job,base))
+
 def dataset_actor(module,args):
     # userId/hostAdmin originate at the authenticated VPS execution bridge, not
     # a client-provided Principal. Raw actor/admin/path fields are rejected below.
@@ -326,15 +377,17 @@ def dataset_error(error):
 def dataset_background_active(key):
     return subprocess.run(['/usr/bin/systemctl','--user','is-active','--quiet','gpuq-data-'+key[:32]],env=ENV,timeout=4).returncode==0
 
-def dataset_background_status(folder,key,spec,cache,actor,*,catalog_snapshot=None):
+def dataset_background_status(folder,key,spec,cache,actor,*,catalog_snapshot=None,warehouse_catalog_snapshot=None):
     # READY is a current cache fact, never a historical worker receipt: a
     # completed transfer may since have been evicted or its mount removed.
     current={}
     if spec['op']=='prepare' and spec.get('warehouse') is True:
-        current=storage_warehouse().status(actor,spec['dataset'],spec['version'])
+        warehouse=storage_warehouse()
+        current=(warehouse.status(actor,spec['dataset'],spec['version']) if warehouse_catalog_snapshot is None
+                 else warehouse._catalog_status_snapshot(actor,spec['dataset'],spec['version'],warehouse_catalog_snapshot))
     elif spec['op']=='prepare':
         current=(cache.status(actor,spec['dataset'],spec['version']) if catalog_snapshot is None
-                 else cache._status_catalog_snapshot(actor,spec['dataset'],spec['version'],catalog_snapshot))
+                 else cache._catalog_status_snapshot(actor,spec['dataset'],spec['version'],catalog_snapshot))
     if current.get('state')=='READY':return {**current,'operationId':key}
     if spec['op']=='prepare' and spec.get('warehouse') is not True and dataset_recovery_configured(cache,actor,spec['dataset'],spec['version']):current['recoveryConfigured']=True
     result=folder/(key+'.result.json')
@@ -406,6 +459,20 @@ def _dataset_op(operation,args,*,_request_id=None,_expected_registration=None,_e
                 # Do not leak mount paths/configuration through errors, and do
                 # not substitute SSD or the root disk for unavailable HDD.
                 result['storageOverview']['warehouse']={'state':'UNAVAILABLE','volume':None}
+        elif isinstance(CONFIG.get('storageAuthority'),dict) and CONFIG['storageAuthority'].get('enabled') is True:
+            # A protected single-root authority shares its real volume with
+            # the training/workspace role. Reuse this exact guarded snapshot;
+            # no second stat, authority journal creation or dataset scan.
+            archive=CONFIG.get('storageArchive',{})
+            tier=CONFIG.get('storageTier',{'enabled':False})
+            local=(CONFIG['storageAuthority']=={'enabled':True}
+                and isinstance(archive,dict) and set(archive)=={'enabled','machine','authority'}
+                and archive.get('enabled') is True and archive.get('machine')==CONFIG.get('machine')
+                and isinstance(CONFIG.get('machine'),str) and DATASET_ID.fullmatch(CONFIG['machine'])
+                and isinstance(archive.get('authority'),str) and DATASET_ID.fullmatch(archive['authority'])
+                and tier.get('enabled',False) is False)
+            result['storageOverview']['warehouse']={'state':'READY' if local else 'UNAVAILABLE',
+                'volume':dict(result['storageOverview']['cache']['volume']) if local else None}
         if dataset_delete_capability()==1:result['datasetDelete']=1
         return result
     folder=ROOT/'dataset-ops';folder.mkdir(mode=0o700,exist_ok=True)
@@ -447,13 +514,14 @@ def _dataset_op(operation,args,*,_request_id=None,_expected_registration=None,_e
                     try:binding=warehouse.binding(item['dataset'],value['version'])
                     except FileNotFoundError:continue
                     value['logicalDataset']=binding['source']
-            originals=warehouse.list(actor)
+            originals,warehouse_snapshots=warehouse._list_datasets_snapshot(actor)
             for item in originals['datasets']:
                 for value in item['versions']:
                     if value.get('errorCode')=='CACHE_METADATA_INCOMPLETE':continue
                     pending=dataset_current_prepare(folder,item['dataset'],value['version'])
                     if pending:
-                        try:value.update(dataset_background_status(folder,*pending,cache,actor))
+                        try:value.update(dataset_background_status(folder,*pending,cache,actor,
+                            warehouse_catalog_snapshot=warehouse_snapshots[(item['dataset'],value['version'])]))
                         except module.CacheMetadataIncomplete:
                             value.update(cache._catalog_incomplete(value))
                             value.update(warehouseReady=False,warehouseCanPrepare=False,
@@ -624,6 +692,15 @@ def acquire_datasets(job):
 def _acquire_datasets(job):
     refs=dataset_refs(job)
     if not refs:return []
+    if dataset_read_mode(job)=='warehouse':
+        # A warehouse reader must never enter the legacy receipt/cache fallback.
+        # Persist source/generation intent and cold leases before scheduler admission.
+        prepared=storage_leases().handoff_if_present(job)
+        if prepared is None:
+            storage_leases().prepare(job)
+            prepared=storage_leases().handoff_if_present(job)
+        if prepared is None:raise ValueError('Warehouse training requires its durable source journal')
+        return prepared
     if CONFIG.get('storageArchive',{}).get('enabled') is True or os.path.lexists(ROOT/'storage-leases'):
         prepared=storage_leases().handoff_if_present(job)
         if prepared is not None:return prepared
@@ -654,7 +731,7 @@ def reject_unsubmitted_datasets(job,receipt):
     if receipt.exists():
         if json.loads(receipt.read_text())!=identity:raise ValueError('Invalid dataset rejection receipt')
     else:atomic_json(receipt,identity)
-    module,cache=dataset_cache();actor=module.Principal('scheduler',True)
+    module,cache=dataset_training_cache(job);actor=module.Principal('scheduler',True)
     for ref in dataset_refs(job):
         with cache._locked():
             cache._record(actor,ref['dataset'],ref['version'])
@@ -769,6 +846,8 @@ def dataset_open_mounts(job,*,runner=False):
             leases=None
             if os.path.lexists(ROOT/'storage-leases'/'training'/job['id']):
                 leases=storage_leases().runner_handoff(job,proof)
+            if dataset_read_mode(job)=='warehouse' and leases is None:
+                raise ValueError('Warehouse runner requires its durable source journal')
             opened=_dataset_open_mounts(job,leases)
             try:
                 if dataset_runner_proof(job)!=proof:raise ValueError('Dataset runner authority changed during handoff')
@@ -782,11 +861,23 @@ def _dataset_open_mounts(job,leases=None):
     if leases is None:leases=acquire_datasets(job)
     opened=[]
     try:
-        module,_=dataset_cache()
-        for ref,lease in zip(dataset_refs(job),leases):
+        refs=dataset_refs(job)
+        if not isinstance(leases,list) or len(leases)!=len(refs):raise ValueError('Incomplete dataset lease handoff')
+        module,cache=dataset_training_cache(job)
+        for ref,lease in zip(refs,leases):
             if lease.get('readOnly') is not True:raise ValueError('Dataset lease is not read-only')
-            with module._directory(Path(lease['path'])) as descriptor:fd=os.dup(descriptor)
-            opened.append((fd,'/data2/'+ref.get('mountAs',lease['dataset'])))
+            if lease.get('dataset')!=ref['dataset'] or lease.get('version')!=ref['version'] or lease.get('path')!=str(cache._paths(ref['dataset'],ref['version'])['ready']/'data'):
+                raise ValueError('Dataset lease source identity differs')
+            if dataset_read_mode(job)=='warehouse':
+                with storage_leases().mount_source(job,ref,lease) as (module,_,snapshot):
+                    with module._directory(Path(lease['path'])) as descriptor:
+                        if list(module._stamp(os.fstat(descriptor)))!=snapshot['ready'][2]:raise ValueError('Opened warehouse data identity changed')
+                        fd=os.dup(descriptor)
+                        opened.append((fd,'/data2/'+ref.get('mountAs',lease['dataset'])))
+            else:
+                with module._directory(Path(lease['path'])) as descriptor:
+                    fd=os.dup(descriptor)
+                    opened.append((fd,'/data2/'+ref.get('mountAs',lease['dataset'])))
         return opened
     except BaseException:
         for fd,_ in opened:os.close(fd)
@@ -866,17 +957,21 @@ def release_datasets(job,data=None,never_dispatched=False,expected_native=None):
     finalized=None
     if os.path.lexists(ROOT/'storage-leases'/'training'/job['id']):
         finalized=storage_leases().finalize_training(job,stopped_native=data if has_retries else None)
+    if dataset_read_mode(job)=='warehouse':
+        if finalized is None:raise ValueError('Warehouse cleanup requires its durable source journal; holds retained')
+        filename.unlink(missing_ok=True)
+        return True
     # A journal validates the exact receipt before retiring all its namespaces.
     # Do not release its same IDs twice: legitimate eviction/unregistration can
     # occur as soon as the final lease is gone, before this receipt is unlinked.
     if finalized is None and os.path.lexists(filename):
-        module,cache=dataset_cache();leases=json.loads(filename.read_text());actor=module.Principal('scheduler',True)
+        module,cache=dataset_training_cache(job);leases=json.loads(filename.read_text());actor=module.Principal('scheduler',True)
         for lease in leases:cache.release_lease(actor,lease['dataset'],lease['version'],lease['leaseId'])
     # Older attempts can lose the receipt after acquiring a lease (or before
     # the durable handoff journal existed). The immutable job and confirmed
     # stopped scheduler/cgroup proof above are the authority, not a TTL or the
     # receipt's absence. Recover only this owner's exact job/reference holds.
-    module,cache=dataset_cache();actor=module.Principal('scheduler',True)
+    module,cache=dataset_training_cache(job);actor=module.Principal('scheduler',True)
     for ref in dataset_refs(job):
         with cache._locked():
             retained=[lease for lease in cache._leases(ref['dataset'],ref['version'])
@@ -976,7 +1071,7 @@ def file_op(operation,args,root=None):
 
 def validate_job(job,readonly=False):
     required={'id','userId','username','cards','argv','name','minVramGiB'}
-    if not isinstance(job,dict) or not required<=set(job) or set(job)-required-{'datasets','project','release','priority','preemptIdleOnly','scheduling','elastic','placement'}:raise ValueError('Invalid job specification')
+    if not isinstance(job,dict) or not required<=set(job) or set(job)-required-{'datasets','datasetReadMode','project','release','priority','preemptIdleOnly','scheduling','elastic','placement'}:raise ValueError('Invalid job specification')
     if not UUID.fullmatch(job['id']):raise ValueError('Invalid job ID')
     if readonly:
         if not isinstance(job['userId'],str) or not re.fullmatch(r'(builtin-admin|demo-user-[0-9]+)',job['userId']):raise ValueError('Invalid identity')
@@ -985,6 +1080,7 @@ def validate_job(job,readonly=False):
     if type(job['cards'])!=int or not 1<=job['cards']<=CONFIG.get('cards',64):raise ValueError('Invalid card count')
     if not isinstance(job['argv'],list) or not 1<=len(job['argv'])<=128 or any(not isinstance(a,str) or '\0' in a for a in job['argv']) or len(json.dumps(job['argv']))>12000:raise ValueError('Invalid argv')
     dataset_refs(job)
+    dataset_read_mode(job)
     policy=SCHEDULING.normalize_job_policy(job)
     SCHEDULING.elastic_allocation(job)
     SCHEDULING.gpu_placement(job)
@@ -1519,11 +1615,16 @@ def dataset_retirement_worker(key,action):
         return 1
 
 
-def storage_archive():
+def storage_archive(source_policy=None):
     global STORAGE_ARCHIVE
-    if STORAGE_ARCHIVE is None:
+    if STORAGE_ARCHIVE is None or source_policy is not None:
         spec=importlib.util.spec_from_file_location('gpuq_storage_archive',HERE/'storage-archive.py')
         module=importlib.util.module_from_spec(spec);sys.modules[spec.name]=module;spec.loader.exec_module(module)
+        if source_policy is not None:
+            # Certification concerns the training cache, not the local HDD
+            # ingress view on machines with separate cache/warehouse roots.
+            executor=sys.modules[__name__] if __name__ in sys.modules else SimpleNamespace(**globals())
+            return module.StorageArchive.from_executor(executor,source_policy=source_policy)
         STORAGE_ARCHIVE=module.StorageArchive.from_executor(dataset_ingress_view())
     return STORAGE_ARCHIVE
 
@@ -1606,6 +1707,13 @@ def storage_archive_operation(operation,args):
              'storage.archive.original':'original','storage.archive.provision':'provision',
              'storage.archive.certify':'certify'}
     if operation not in methods:raise ValueError('Unknown internal archive operation')
+    if isinstance(args,dict) and 'sourcePolicy' in args:
+        if (operation!='storage.archive.certify' and not (
+                operation=='storage.archive.retire' and args.get('mode')=='authority-target-v1')):
+            raise ValueError('Source policy is only valid for target certification or retirement')
+        if args['sourcePolicy'] is None:raise ValueError('Invalid source policy')
+        request={key:value for key,value in args.items() if key!='sourcePolicy'}
+        return getattr(storage_archive(args['sourcePolicy']),methods[operation])(request)
     return getattr(storage_archive(),methods[operation])(args)
 
 
@@ -1667,6 +1775,19 @@ def dataset_cache_action_operation(operation,args):
 
 def process(operation,args):
     platform_root_check()
+    if operation=='storage.training.prepare':
+        spec=importlib.util.spec_from_file_location('gpuq_training_preparation',HERE/'training-preparation.py')
+        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        return module.dispatch(sys.modules[__name__] if __name__ in sys.modules else SimpleNamespace(**globals()),args)
+    if operation=='storage.training.project.prepare':
+        spec=importlib.util.spec_from_file_location('gpuq_training_preparation',HERE/'training-preparation.py')
+        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        return module.project_dispatch(sys.modules[__name__] if __name__ in sys.modules else SimpleNamespace(**globals()),args)
+    if operation=='datasets.training.status':return dataset_training_sources().status(args)
+    if operation=='storage.training.plan':
+        spec=importlib.util.spec_from_file_location('gpuq_training_storage',HERE/'training-storage.py')
+        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        return module.plan(sys.modules[__name__] if __name__ in sys.modules else SimpleNamespace(**globals()),args)
     if operation in ('tasks.display.get','tasks.display.set'):
         definition=importlib.util.spec_from_file_location('gpuq_console_task_display_edit',HERE/'task-display.py')
         module=importlib.util.module_from_spec(definition);definition.loader.exec_module(module)
@@ -1774,6 +1895,11 @@ def process(operation,args):
     with project_store.lifetime(job['userId'],job['project']) if project_store else nullcontext(), open(ROOT/'jobs'/f'{jid}.lock','a') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX)
         spec=ROOT/'jobs'/f'{jid}.json'
+        if operation=='cancel' and dataset_read_mode(job)=='warehouse':
+            # Before creating this identity, distinguish a genuinely first
+            # cancel from an existing/missing-journal hold. Never infer empty
+            # holds from a receipt's absence after the identity was persisted.
+            dataset_training_sources().cancel_unseen(job)
         if spec.exists():
             if json.loads(spec.read_text())!=job:raise ValueError('Job identity mismatch')
         else:
@@ -1976,7 +2102,9 @@ if __name__=='__main__':
     if len(sys.argv)==2 and sys.argv[1]=='--storage-collect':
         print(json.dumps(storage_collect()));sys.exit(0)
     if len(sys.argv)==4 and sys.argv[1]=='--transfer-worker':sys.exit(transfers().worker(sys.argv[2],int(sys.argv[3])))
+    if len(sys.argv)==4 and sys.argv[1]=='--training-transfer-worker':sys.exit(transfers().worker(sys.argv[2],int(sys.argv[3]),require_training=True))
     if len(sys.argv)==4 and sys.argv[1]=='--project-copy-worker':sys.exit(project_copies().worker(sys.argv[2],int(sys.argv[3])))
+    if len(sys.argv)==4 and sys.argv[1]=='--training-project-copy-worker':sys.exit(project_copies().worker(sys.argv[2],int(sys.argv[3]),require_training=True))
     if len(sys.argv)==2 and sys.argv[1]=='--transfer-peer-daemon':
         spec=importlib.util.spec_from_file_location('gpuq_transfer_peer',HERE/'transfer-peer.py')
         module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
@@ -1986,6 +2114,10 @@ if __name__=='__main__':
         module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
         module.serve(dataset_ingress_view(),dataset_uploads());sys.exit(0)
     if len(sys.argv)==3 and sys.argv[1]=='--dataset-worker':sys.exit(dataset_worker(sys.argv[2]))
+    if len(sys.argv)==3 and sys.argv[1]=='--training-dataset-worker':
+        spec=importlib.util.spec_from_file_location('gpuq_training_preparation',HERE/'training-preparation.py')
+        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        sys.exit(module.dataset_worker(sys.modules[__name__],sys.argv[2]))
     if len(sys.argv)==3 and sys.argv[1]=='--dataset-cache-worker':sys.exit(dataset_cache_actions().release_worker(sys.argv[2]))
     if len(sys.argv)==5 and sys.argv[1]=='--dataset-upload-worker':sys.exit(dataset_uploads().worker(*sys.argv[2:]))
     if len(sys.argv)==4 and sys.argv[1]=='--data-workspace-worker':sys.exit(data_workspaces().worker(*sys.argv[2:]))
@@ -1993,7 +2125,7 @@ if __name__=='__main__':
     if len(sys.argv)==5 and sys.argv[1]=='--cloud-files-worker':sys.exit(cloud_files().worker(*sys.argv[2:]))
     if len(sys.argv)==4 and sys.argv[1]=='--data-workspace-recover':
         print(json.dumps(data_workspaces().recover(*sys.argv[2:])));sys.exit(0)
-    if len(sys.argv)==3 and sys.argv[1]=='--project-worker':sys.exit(projects().worker(sys.argv[2]))
+    if len(sys.argv) in (3,5) and sys.argv[1]=='--project-worker':sys.exit(projects().worker(*sys.argv[2:]))
     if len(sys.argv)==5 and sys.argv[1]=='--project-local-import-worker':sys.exit(projects().local_imports().worker(*sys.argv[2:]))
     try:
         files_rpc_mode=len(sys.argv)==2 and sys.argv[1]=='--dataset-files-rpc'

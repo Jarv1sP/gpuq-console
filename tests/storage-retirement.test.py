@@ -19,8 +19,12 @@ class AuthorityRetirementTests(unittest.TestCase):
     tls_target = F.ArchiveTests.tls_target
     provision = F.ArchiveTests.provision
 
-    def prepared(self, *, remove=True):
+    def prepared(self, *, remove=True, scoped=False):
         target = self.tls_target();target.worker_state = Mock(return_value='STOPPED')
+        if scoped:
+            self.target_node.CONFIG['storageArchive']={'enabled':True,'machine':'other-node','authority':'other-hdd'}
+            target=M.StorageArchive.from_executor(self.target_node,source_policy=dict(F.POLICY))
+            target.worker_state=Mock(return_value='STOPPED')
         grant = self.provision()
         certify = str(uuid.uuid4())
         result = target.certify(dict(opId=certify,userId=USER,target=dict(dataset='replica',version=self.version),grant=grant))
@@ -72,6 +76,41 @@ class AuthorityRetirementTests(unittest.TestCase):
         self.assertEqual(self.cold.status(ADMIN,'replacement',f['new'])['state'],'READY')
         self.assertIn(f['replacement']['receipt']['pinId'],self.cold._tier('replacement',f['new'])['pins'])
         self.assertEqual(len(f['state']),1)
+
+    def test_scoped_target_retirement_resumes_matching_certification_namespace(self):
+        f=self.prepared(scoped=True)
+        default_root=self.target_node.ROOT/'storage-archive'
+        before={str(path.relative_to(default_root)):path.read_bytes() for path in default_root.rglob('*') if path.is_file()}
+        recovered=M.StorageArchive.from_executor(self.target_node,source_policy=dict(F.POLICY))
+        recovered.worker_state=Mock(return_value='STOPPED')
+        proof=recovered.retire(f['args'])
+        self.assertEqual(proof['state'],'REVOKED')
+        self.assertEqual(recovered.retire(f['args']),proof)
+        self.assertEqual(before,{str(path.relative_to(default_root)):path.read_bytes() for path in default_root.rglob('*') if path.is_file()})
+        source=self.source_args(f,proof)
+        self.assertEqual(self.source.retire(source)['state'],'RETIRED')
+        self.assertEqual(self.cold.status(ADMIN,'replacement',f['new'])['state'],'READY')
+
+    def test_default_and_scoped_certifications_block_each_others_retirement(self):
+        f=self.prepared(remove=False,scoped=True)
+        self.target_node.CONFIG['storageArchive']=dict(F.POLICY)
+        legacy=M.StorageArchive.from_executor(self.target_node);legacy.worker_state=Mock(return_value='STOPPED')
+        second=str(uuid.uuid4())
+        legacy.certify(dict(opId=second,userId=USER,target=f['args']['target'],grant=f['grant']))
+        f['args']['recoveryId']=self.hot.unregister(ADMIN,'replica',self.version)['recoveryId']
+        for adapter,args in ((f['target'],f['args']),(legacy,{**f['args'],'certifyId':second})):
+            with self.subTest(namespace=adapter.root),self.assertRaisesRegex(ValueError,'Another or unknown certification'):
+                adapter.retire(args)
+        self.assertFalse(legacy.remote.fence_path('original',self.version).exists())
+
+    def test_unconfirmed_or_corrupt_other_namespace_keeps_grant_protected(self):
+        f=self.prepared(scoped=True)
+        folder=self.target_node.ROOT/'storage-archive'/'operations'/str(uuid.uuid4())
+        A._private_root(folder)
+        with self.assertRaisesRegex(ValueError,'Unknown or corrupt'):f['target'].retire(f['args'])
+        D._write_json(folder/'journal.json',{'schema':1,'kind':'certify','request':{'opId':folder.name}})
+        with self.assertRaisesRegex(ValueError,'Unknown certification grant'):f['target'].retire(f['args'])
+        self.assertFalse(f['target'].remote.fence_path('original',self.version).exists())
 
     def test_target_requires_normal_removal_and_exact_certification(self):
         f = self.prepared(remove=False)

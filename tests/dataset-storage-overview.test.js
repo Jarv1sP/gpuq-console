@@ -80,6 +80,26 @@ test('same device bind aliases are deduplicated; content usage never masquerades
   assert.equal(value.datasets[0].versions[0].originals[0].dataset,'sample');
 });
 
+test('single-root authority and workspace share one physical snapshot without inventing original readiness',async()=>{
+  const shared=snapshot('d'),f=fixture({records:{[cold]:[record('sample',[{version:hash,state:'READY',bytes:42,files:2}])]},
+    capacities:{[cold]:capacity(shared,{state:'READY',volume:{...shared}},null)}});
+  const value=await f.call(),local=value.caches.find(row=>row.machine===cold),warehouse=value.warehouse.volumes[0];
+  assert.equal(value.physicalVolumes.filter(row=>row.machine===cold).length,1);
+  assert.equal(local.volume.id,warehouse.volume.id);assert.equal(local.volume.totalBytes,1000);
+  assert.equal(warehouse.volume.totalBytes,1000);assert.equal(local.budgetBytes,null);
+  assert.equal(value.datasets[0].versions[0].originals.length,0);
+  assert.equal(warehouse.originalContentBytes,0);
+  assert.ok(warehouse.warnings.some(row=>row.code==='CACHE_WAREHOUSE_SHARED_VOLUME'));
+});
+
+test('distinct guarded warehouse and work volumes remain separate physical devices',async()=>{
+  const f=fixture({capacities:{[cold]:capacity(snapshot('d'),{state:'READY',volume:snapshot('e')})}});
+  const value=await f.call();
+  assert.equal(value.physicalVolumes.filter(row=>row.machine===cold).length,2);
+  assert.notEqual(value.caches.find(row=>row.machine===cold).volume.id,value.warehouse.volumes[0].volume.id);
+  assert.ok(value.warehouse.warnings.every(row=>row.code!=='CACHE_WAREHOUSE_SHARED_VOLUME'));
+});
+
 test('warehouse warning watermarks are observations only and do not reject reads or emit personal capacity caps',async()=>{
   const full=snapshot('e',{usedBytes:950,availableBytes:0,usableBytes:0,readOnly:true}),f=fixture({capacities:{[cold]:capacity(snapshot('d'),{state:'READY',volume:full})}});
   const value=await f.call();
@@ -131,6 +151,43 @@ test('overview never refreshes removal exclusions, even for administrators',asyn
   f.service.db={prepare:()=>assert.fail('overview must not mutate cleanup bookkeeping')};
   const value=await f.call({}, {...principal,role:'admin'});
   assert.equal(value.protocol,'dataset-storage-overview-v1');
+});
+
+test('catalog and capacity reads start in one window without waiting for an offline catalog',async()=>{
+  const f=fixture(),bridge=f.service.bridge;
+  let releaseCatalog;
+  const gate=new Promise(resolve=>{releaseCatalog=resolve;});
+  f.service.bridge=async(machine,operation,args)=>{
+    if(operation==='datasets.list')await gate;
+    return bridge(machine,operation,args);
+  };
+  const pending=f.call();
+  try{
+    // Flush the deadline wrapper's dispatch microtasks while the catalog gate
+    // remains closed; no elapsed threshold can hide a sequential dependency.
+    await new Promise(setImmediate);
+    assert.equal(f.calls.filter(row=>row.operation==='datasets.capacity').length,MACHINES.length);
+    assert.equal(f.calls.filter(row=>row.operation==='datasets.list').length,0);
+  }finally{releaseCatalog();}
+  const value=await pending;
+  assert.equal(value.protocol,'dataset-storage-overview-v1');
+  assert.equal(value.partial,false);
+  assert.equal(f.calls.length,MACHINES.length*2);
+});
+
+test('revocation while a concurrent catalog is pending cannot expose already-collected capacity',async()=>{
+  const f=fixture(),bridge=f.service.bridge;
+  let releaseCatalog;
+  const gate=new Promise(resolve=>{releaseCatalog=resolve;});
+  f.service.bridge=async(machine,operation,args)=>{
+    if(operation==='datasets.list')await gate;
+    return bridge(machine,operation,args);
+  };
+  const pending=f.call();
+  await new Promise(setImmediate);
+  assert.equal(f.calls.filter(row=>row.operation==='datasets.capacity').length,MACHINES.length);
+  f.user.enabled=false;releaseCatalog();
+  await assert.rejects(pending,error=>error.status===403);
 });
 
 test('all-account real project usage is independent from cache logical sizes and never invented for legacy nodes',async()=>{

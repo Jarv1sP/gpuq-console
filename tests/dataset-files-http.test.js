@@ -40,7 +40,7 @@ async function fixture(t){
 }
 
 test('HTTP directory metadata is compact, maintenance-readable and bypasses the mutation tail',async t=>{
-  const f=await fixture(t);await f.call('maintenance.set',{scope:'global',enabled:true,reason:'local read fixture'});
+  const f=await fixture(t);assert.equal((await f.call('maintenance.set',{scope:'all',revision:0,enabled:true,reason:'local read fixture'})).status,200);
   let release;const original=f.service.tail;f.service.tail=new Promise(resolve=>release=resolve);
   try{
     const response=await Promise.race([f.call('datasets.files.list',{dataset:'sample',version},f.member.token),new Promise((_,reject)=>setTimeout(()=>reject(Error('directory read blocked by mutation tail')),1000))]);

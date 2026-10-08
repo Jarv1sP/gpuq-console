@@ -93,6 +93,36 @@ class GpuFenceAuditError(RuntimeError):
     """Durable GPU ownership cannot be safely partitioned per device."""
 
 
+def _canonical_control_group(group: Any) -> bool:
+    return (
+        isinstance(group, str)
+        and group.startswith("/")
+        and "\x00" not in group
+        and all(part not in ("", ".", "..") for part in group[1:].split("/"))
+    )
+
+
+def _control_group_owners(statuses: dict[str, Any]) -> dict[str, str]:
+    """Index verified unit roots without permitting ambiguous descendants."""
+    owners: dict[str, str] = {}
+    for attempt_id, status in statuses.items():
+        group = status.control_group
+        if not group:
+            continue
+        if not _canonical_control_group(group):
+            raise GpuFenceAuditError("invalid systemd control group")
+        if group in owners:
+            raise GpuFenceAuditError("systemd control group is shared by attempts")
+        owners[group] = attempt_id
+    for group in owners:
+        parent = group.rpartition("/")[0]
+        while parent:
+            if parent in owners:
+                raise GpuFenceAuditError("systemd control groups overlap between attempts")
+            parent = parent.rpartition("/")[0]
+    return owners
+
+
 class StartCapacityBlocked(RuntimeError):
     """A reserved start target is locally unavailable but remains fenced."""
 
@@ -438,23 +468,29 @@ class Coordinator:
         dict[str, set[int]],
         list[CollisionFinding],
     ]:
-        group_to_attempt = {
-            status.control_group: attempt_id
-            for attempt_id, status in statuses.items()
-            if status.control_group
-        }
+        group_to_attempt = _control_group_owners(statuses)
         managed: dict[str, set[int]] = {}
         external: dict[str, set[int]] = {}
-        pid_attempt: dict[int, str] = {}
+        pid_attempt: dict[int, str | None] = {}
         for device in devices:
             for pid in device.compute_pids:
-                group = self.cgroup_for_pid(pid)
-                attempt_id = group_to_attempt.get(group or "")
+                if pid not in pid_attempt:
+                    group = self.cgroup_for_pid(pid)
+                    attempt_id = None
+                    if _canonical_control_group(group):
+                        # Delegated OCI/Ray payloads can live below the unit.
+                        # Walk path components, never a raw string prefix.
+                        while group:
+                            attempt_id = group_to_attempt.get(group)
+                            if attempt_id is not None:
+                                break
+                            group = group.rpartition("/")[0]
+                    pid_attempt[pid] = attempt_id
+                attempt_id = pid_attempt[pid]
                 if attempt_id is None:
                     external.setdefault(device.uuid, set()).add(pid)
                 else:
                     managed.setdefault(device.uuid, set()).add(pid)
-                    pid_attempt[pid] = attempt_id
         leases_by_uuid: dict[str, list[dict[str, Any]]] = {}
         for lease in leases:
             leases_by_uuid.setdefault(lease["gpu_uuid"], []).append(lease)
@@ -551,18 +587,7 @@ class Coordinator:
         duplicated runtime cgroup remains a controller-wide failure.
         """
 
-        control_group_owner: dict[str, str] = {}
-        for attempt_id, status in statuses.items():
-            control_group = str(status.control_group or "")
-            if not control_group:
-                continue
-            previous = control_group_owner.get(control_group)
-            if previous is not None and previous != attempt_id:
-                raise GpuFenceAuditError(
-                    "systemd control group is shared by attempts "
-                    f"{previous} and {attempt_id}"
-                )
-            control_group_owner[control_group] = attempt_id
+        _control_group_owners(statuses)
 
         by_uuid = {device.uuid: device for device in devices}
         managed = set(self.config.managed_gpu_uuids)

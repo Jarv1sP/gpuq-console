@@ -30,6 +30,9 @@ class WarehouseOverlay(unittest.TestCase):
    _catalog_incomplete=self.d.DatasetCache._catalog_incomplete,
    deletion_permissions=Mock(return_value={'allowed':True,'memberAllowed':True,'reason':None}))
   self.warehouse=SimpleNamespace(list=Mock(),binding=Mock(side_effect=FileNotFoundError),status=Mock())
+  self.catalog_snapshot=object()
+  self.warehouse._list_datasets_snapshot=Mock(side_effect=lambda actor:(self.warehouse.list(actor),{('cold',self.version):self.catalog_snapshot}))
+  self.warehouse._catalog_status_snapshot=Mock()
   for name,value in [('dataset_cache',(self.d,self.cache)),('dataset_actor',object()),('storage_warehouse',self.warehouse),('dataset_delete_capability',1),('dataset_recovery_configured',False)]:
    p=patch.object(self.n,name,return_value=value);p.start();self.addCleanup(p.stop)
  def call(self):return self.n._dataset_op('datasets.list',{'userId':'fixture-owner','hostAdmin':True})
@@ -55,14 +58,34 @@ class WarehouseOverlay(unittest.TestCase):
   self.warehouse.list.return_value={'datasets':[{'dataset':'cold','versions':[row]}]}
   task={'op':'prepare','warehouse':True,'dataset':'cold','version':self.version}
   self.warehouse.status.side_effect=self.d.CacheMetadataIncomplete('private path must not escape')
+  self.warehouse._catalog_status_snapshot.side_effect=self.d.CacheMetadataIncomplete('private path must not escape')
   folder=self.n.ROOT/'dataset-ops';folder.mkdir()
   (folder/('b'*64+'.result.json')).write_text(json.dumps({'state':'READY','operationId':'b'*64}))
   with patch.object(self.n,'dataset_current_prepare',return_value=('b'*64,task)):
    result=self.call()
   self.assert_unknown(result['datasets'][0]['versions'][0]);self.assertFalse(row['warehouseReady']);self.assertFalse(row['warehouseCanPrepare'])
   self.assertNotIn('private path',json.dumps(result))
+  self.warehouse._catalog_status_snapshot.assert_called_once()
+  self.assertEqual(self.warehouse._catalog_status_snapshot.call_args.args[1:3],('cold',self.version))
+  self.assertIs(self.warehouse._catalog_status_snapshot.call_args.args[3],self.catalog_snapshot)
+  self.warehouse.status.assert_not_called()
   # The exact same worker status remains strict outside the display overlay.
   with self.assertRaises(self.d.CacheMetadataIncomplete):self.n.dataset_background_status(folder,'b'*64,task,self.cache,object())
+ def test_pending_warehouse_catalog_uses_only_trusted_same_call_display_snapshot(self):
+  row={'version':self.version,'state':'REGISTERED','canPrepare':True,'warehouseReady':True,'warehouseCanPrepare':True}
+  self.warehouse.list.return_value={'datasets':[{'dataset':'cold','versions':[row]}]}
+  self.warehouse.status.side_effect=AssertionError('catalog cannot enter strict status')
+  self.warehouse._catalog_status_snapshot.return_value={'dataset':'cold','version':self.version,
+   'state':'REGISTERED','warehouseReady':True,'canPrepare':True,'warehouseCanPrepare':True}
+  folder=self.n.ROOT/'dataset-ops';folder.mkdir()
+  (folder/('b'*64+'.result.json')).write_text(json.dumps({'state':'READY','operationId':'b'*64}))
+  with patch.object(self.n,'dataset_current_prepare',return_value=('b'*64,{'op':'prepare','warehouse':True,'dataset':'cold','version':self.version})):
+   result=self.call()
+  self.assertEqual(result['datasets'][0]['versions'][0]['state'],'REGISTERED')
+  self.assertTrue(result['datasets'][0]['versions'][0]['warehouseReady'])
+  self.warehouse._catalog_status_snapshot.assert_called_once()
+  self.assertIs(self.warehouse._catalog_status_snapshot.call_args.args[-1],self.catalog_snapshot)
+  self.warehouse.status.assert_not_called()
  def test_ordinary_cache_parent_lost_during_overlay_is_unknown(self):
   row={'version':self.version,'state':'REGISTERED','canPrepare':True}
   self.cache._list_datasets_snapshot.return_value=({'datasets':[{'dataset':'hot','versions':[row]}]},{('hot',self.version):object()})

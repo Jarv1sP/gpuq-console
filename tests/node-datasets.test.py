@@ -432,6 +432,15 @@ class NodeDatasets(unittest.TestCase):
         self.assertEqual(result['datasets'][0]['versions'][0]['state'], 'PREPARING')
         self.assertEqual(read.call_count, 1)
 
+    def test_list_pending_display_does_not_reenter_real_global_writer_lock(self):
+        response, _ = self.start_prepare()
+        with self.cache._locked(), \
+                patch.object(self.module.DatasetCache, '_locked', side_effect=AssertionError('display reentered writer lock')), \
+                patch.object(self.node, 'dataset_background_active', return_value=True):
+            result = self.call('list')
+        self.assertEqual(result['datasets'][0]['versions'][0]['state'], 'PREPARING')
+        self.assertEqual(result['datasets'][0]['versions'][0]['operationId'], response['operationId'])
+
     def test_list_pending_overlay_rechecks_revoked_acl_after_catalog(self):
         self.start_prepare()
         snapshot = self.module.DatasetCache._list_datasets_snapshot

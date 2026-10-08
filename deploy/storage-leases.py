@@ -52,8 +52,35 @@ class StorageLeases:
     def _training(self, job):
         self._identity(job.get('id'), job.get('userId'))
         refs = self.n.dataset_refs(job)
-        return {'id': job['id'], 'userId': job['userId'],
+        base = {'id': job['id'], 'userId': job['userId'],
                 'references': json.loads(json.dumps(refs))}
+        mode = job.get('datasetReadMode', 'cache')
+        if not isinstance(mode, str) or mode not in ('cache', 'warehouse'):
+            raise ValueError('Invalid immutable dataset read mode')
+        return self.n.dataset_training_sources().binding(job, base) if mode == 'warehouse' else base
+
+    def _cache(self, binding):
+        if binding.get('datasetReadMode', 'cache') == 'cache':
+            return self.n.dataset_cache()
+        return self.n.dataset_training_sources().cache(binding)
+
+    @contextmanager
+    def _source(self, binding, ref, record, index, path, *, capture=False):
+        if binding.get('datasetReadMode', 'cache') == 'cache':
+            yield self.n.dataset_cache()
+            return
+        snapshots = record['sourceSnapshots']
+        if index >= len(snapshots) and not capture:
+            raise ValueError('Durable warehouse source snapshot is missing')
+        expected = snapshots[index] if index < len(snapshots) else None
+        with self.n.dataset_training_sources().guard(binding, ref, expected) as value:
+            module, cache, _, snapshot, _ = value
+            if expected is None:
+                if index != len(snapshots):
+                    raise ValueError('Warehouse source snapshot order changed')
+                snapshots.append(snapshot)
+                self._save(path, record)  # Fixed generation BEFORE acquiring its lease.
+            yield module, cache
 
     def _download(self, args, extra=()):
         if not isinstance(args, dict) or set(args) - {'id', 'userId', 'reference', 'hostAdmin'} - set(extra):
@@ -143,6 +170,14 @@ class StorageLeases:
         if (len(record['leases']) > expected or record['state'] in ('HELD', 'HANDED_OFF')
                 and len(record['leases']) != expected):
             raise ValueError('Completed storage hold has incomplete lease metadata')
+        if binding.get('datasetReadMode') == 'warehouse':
+            snapshots = record.get('sourceSnapshots')
+            if (not isinstance(snapshots, list) or not len(record['leases']) <= len(snapshots) <= expected
+                    or record['state'] in ('HELD', 'HANDED_OFF') and len(snapshots) != expected
+                    or any(not isinstance(value, dict) or set(value) != {'dataset', 'version', 'registration', 'ready'}
+                           or (value['dataset'], value['version']) != (ref['dataset'], ref['version'])
+                           for value, ref in zip(snapshots, binding['references']))):
+                raise ValueError('Durable warehouse source snapshots changed')
         return record
 
     def _save(self, path, record):
@@ -155,6 +190,8 @@ class StorageLeases:
         except FileNotFoundError:
             record = {'schema': 1, 'binding': binding, 'state': 'ACQUIRING',
                       'leases': [], 'createdAt': time.time()}
+            if binding.get('datasetReadMode') == 'warehouse':
+                record['sourceSnapshots'] = []
             self._save(path, record)  # Intent is durable BEFORE acquiring anything.
             return record
 
@@ -190,18 +227,18 @@ class StorageLeases:
             record = self._initial(path, binding)
             if record['state'] not in ('ACQUIRING', 'HELD'):
                 raise ValueError('Preparation was finalized; no same-ID reacquisition')
-            module, cache = self.n.dataset_cache()
-            actor = module.Principal(binding['userId'], False)
             for index, ref in enumerate(binding['references']):
-                if index < len(record['leases']):
-                    self._require(cache, binding, ref, record['leases'][index], binding['id'])
-                lease = cache.acquire_lease(actor, ref['dataset'], ref['version'], binding['id'])
-                if index < len(record['leases']):
-                    if record['leases'][index] != lease:
-                        raise ValueError('Prepared lease path or identity changed')
-                else:
-                    record['leases'].append(lease)
-                    self._save(path, record)
+                with self._source(binding, ref, record, index, path, capture=True) as (module, cache):
+                    actor = module.Principal(binding['userId'], False)
+                    if index < len(record['leases']):
+                        self._require(cache, binding, ref, record['leases'][index], binding['id'])
+                    lease = cache.acquire_lease(actor, ref['dataset'], ref['version'], binding['id'])
+                    if index < len(record['leases']):
+                        if record['leases'][index] != lease:
+                            raise ValueError('Prepared lease path or identity changed')
+                    else:
+                        record['leases'].append(lease)
+                        self._save(path, record)
             record['state'] = 'HELD'
             self._save(path, record)
             return {'jobId': binding['id'], 'state': 'HELD', 'leases': record['leases']}
@@ -233,9 +270,9 @@ class StorageLeases:
                                  'native same-ID retry cannot reopen it; create an explicit new platform '
                                  'submission after data is READY')
             raise ValueError('Preparation hold is not ready for handoff')
-        _, cache = self.n.dataset_cache()
-        for ref, lease in zip(binding['references'], record['leases']):
-            self._require(cache, binding, ref, lease, lease_job_id or binding['id'], ready=True)
+        for index, (ref, lease) in enumerate(zip(binding['references'], record['leases'])):
+            with self._source(binding, ref, record, index, path) as (_, cache):
+                self._require(cache, binding, ref, lease, lease_job_id or binding['id'], ready=True)
         destination = self.n.ROOT / 'jobs' / (binding['id'] + '.datasets.json')
         self.d._mkdir(destination.parent)
         if destination.exists():
@@ -346,7 +383,7 @@ class StorageLeases:
                     # A stale base receipt cannot silently be replaced.
                     if self.d._read_json(destination) != base['leases']:
                         raise ValueError('Existing scheduler receipt is not a retired generation')
-                    _, cache = self.n.dataset_cache()
+                    _, cache = self._cache(binding)
                     for ref in binding['references']:
                         with cache._locked():
                             if any(value['owner'] == binding['userId'] and value['jobId'] == binding['id']
@@ -355,6 +392,8 @@ class StorageLeases:
                     destination.unlink()
                 record = {'schema': 1, 'binding': retry_binding, 'state': 'ACQUIRING',
                           'leases': [], 'consumers': [current], 'createdAt': time.time()}
+                if binding.get('datasetReadMode') == 'warehouse':
+                    record['sourceSnapshots'] = json.loads(json.dumps(base['sourceSnapshots']))
                 self._save(target, record)  # Durable generation precedes leases.
             if record['binding'] != retry_binding or record['state'] not in ('ACQUIRING', 'HELD', 'HANDED_OFF'):
                 raise ValueError('Native retry generation was finalized; a new explicit retry is required')
@@ -363,19 +402,19 @@ class StorageLeases:
             if current not in record['consumers']:
                 record['consumers'].append(current)
                 self._save(target, record)
-            module, cache = self.n.dataset_cache()
-            actor = module.Principal(binding['userId'], False)
             lease_job_id = self._retry_lease_id(retry_binding)
             for index, ref in enumerate(binding['references']):
-                if index < len(record['leases']):
-                    self._require(cache, binding, ref, record['leases'][index], lease_job_id)
-                lease = cache.acquire_lease(actor, ref['dataset'], ref['version'], lease_job_id)
-                if index < len(record['leases']):
-                    if record['leases'][index] != lease:
-                        raise ValueError('Retry generation lease identity changed')
-                else:
-                    record['leases'].append(lease)
-                    self._save(target, record)
+                with self._source(retry_binding, ref, record, index, target) as (module, cache):
+                    actor = module.Principal(binding['userId'], False)
+                    if index < len(record['leases']):
+                        self._require(cache, binding, ref, record['leases'][index], lease_job_id)
+                    lease = cache.acquire_lease(actor, ref['dataset'], ref['version'], lease_job_id)
+                    if index < len(record['leases']):
+                        if record['leases'][index] != lease:
+                            raise ValueError('Retry generation lease identity changed')
+                    else:
+                        record['leases'].append(lease)
+                        self._save(target, record)
             record['state'] = 'HELD'
             self._save(target, record)
             return self._handoff_locked(job, retry_binding, target, record, lease_job_id=lease_job_id)
@@ -384,9 +423,37 @@ class StorageLeases:
         resolve = getattr(self.n, 'dataset_source_cache', None)
         return resolve(ref['dataset'], ref['version']) if resolve is not None else self.n.dataset_cache()
 
+    @contextmanager
+    def mount_source(self, job, ref, lease):
+        """Trusted runner/job flock: pin the durable generation through FD open.
+
+        Handoff's earlier check is not enough: never substitute a newly READY
+        incarnation between scheduler receipt creation and the actual mount.
+        """
+        binding = self._training(job)
+        if binding.get('datasetReadMode') != 'warehouse':
+            raise ValueError('Durable warehouse mount source required')
+        with self._lock('training', binding['id'], create=False) as path:
+            if path is None:
+                raise ValueError('Warehouse mount source journal is missing')
+            base = self._load(path, binding)
+            index = binding['references'].index(ref)
+            candidates = [(path, base)] + self._retry_records(job, path.parent)
+            matches = [(value_path, value) for value_path, value in candidates
+                       if value['state'] == 'HANDED_OFF' and index < len(value['leases'])
+                       and value['leases'][index] == lease]
+            if len(matches) != 1:
+                raise ValueError('Warehouse mount receipt generation is unconfirmed')
+            selected, record = matches[0]
+            active = record['binding']
+            job_id = self._retry_lease_id(active) if 'retry' in active else binding['id']
+            with self._source(active, ref, record, index, selected) as (module, cache):
+                self._require(cache, active, ref, lease, job_id)
+                yield module, cache, record['sourceSnapshots'][index]
+
     def _release_matching(self, binding, refs, job_id, *, _download_source=False):
         for ref in refs:
-            module, cache = self._download_cache(ref) if _download_source else self.n.dataset_cache()
+            module, cache = self._download_cache(ref) if _download_source else self._cache(binding)
             with cache._locked():
                 matches = [lease for lease in cache._leases(ref['dataset'], ref['version'])
                            if lease['owner'] == binding['userId'] and lease['jobId'] == job_id]
@@ -402,8 +469,17 @@ class StorageLeases:
     def cancel_prepare(self, job):
         """Job flock + trusted NEVER-DISPATCHED proof required, not a public flag."""
         binding = self._training(job)
-        with self._lock('training', binding['id']) as path:
-            record = self._initial(path, binding)
+        warehouse = binding.get('datasetReadMode') == 'warehouse'
+        with self._lock('training', binding['id'], create=not warehouse) as path:
+            if warehouse:
+                if path is None:
+                    raise ValueError('Warehouse cancellation requires its durable source journal; holds retained')
+                try:
+                    record = self._load(path, binding)
+                except FileNotFoundError:
+                    raise ValueError('Warehouse cancellation source journal is missing; holds retained') from None
+            else:
+                record = self._initial(path, binding)
             receipt = self.n.ROOT / 'jobs' / (binding['id'] + '.datasets.json')
             if record['state'] == 'HANDED_OFF' or receipt.exists():
                 raise ValueError('Scheduler owns this hold; reconcile job termination')

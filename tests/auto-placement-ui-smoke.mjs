@@ -11,6 +11,7 @@ import {advanceDataPreparation} from '../dataset-preparation.mjs';
 import {usage} from '../execution.mjs';
 import {openSubmit} from './starbase-workflows.mjs';
 import {guardedRoute} from './browser-route-guard.mjs';
+import {projectFootprint,trainingPlan} from './training-storage-fixture.mjs';
 
 const dir=await mkdtemp(join(tmpdir(),'gpuq-auto-browser-')),password='Auto-Browser-Fixture-Only-2026!';
 const source=MACHINES[0].id,target=MACHINES[1].id,release='a'.repeat(64),image='sha256:'+'b'.repeat(64);
@@ -29,6 +30,10 @@ try{
     if(operation==='projects.list')return {projects};
     if(operation==='projects.status')return projects.find(p=>p.project===args.project);
     if(operation==='projects.verify')return {project:args.project,release:args.release,state:'READY'};
+    if(operation==='storage.training.plan'){
+      assert.equal(args.userId,member.id);assert.equal(args.hostAdmin,false);
+      return trainingPlan(machine,args);
+    }
     throw Error('Unexpected fixture operation '+operation);
   };
   ({server,service}=await createPortalServer({database:join(dir,'db'),bootstrap,statusPath,bridge,secure:false,origin}));
@@ -37,7 +42,7 @@ try{
     assert.equal(owner,member.id);
     if(ref.release&&machine!==source)throw Error('fixture release absent');
     return {protocol:'portable-project-v1',enabled:true,environmentMode:'oci',architecture:'amd64',project:ref.project,
-      releaseReady:!!ref.release,...(ref.release?{release:ref.release,image}:{}),sources:[source]};
+      releaseReady:!!ref.release,...(ref.release?{release:ref.release,image,...projectFootprint}:{}),sources:[source]};
   };
   let copied=0;
   service.prepareProject=async(owner,machine,ref)=>{
@@ -60,9 +65,11 @@ try{
   assert.match(await page.locator('#submit-command').textContent(),/--machine auto/);
   assert.match(await page.locator('#submit-command').textContent(),new RegExp('--release.*'+release));
   const submitResponse=page.waitForResponse(r=>r.url()===origin+'/api/call'&&r.request().postDataJSON()?.operation==='jobs.submit');
-  await page.locator('#train-form [type=submit]').click();assert.equal((await submitResponse).status(),200);
+  await page.locator('#train-form [type=submit]').click();const firstResponse=await submitResponse;assert.equal(firstResponse.status(),200,await firstResponse.text());
   await page.waitForFunction(target=>document.querySelector('#submission-receipt').textContent.includes(target)&&document.querySelector('#submission-receipt').textContent.includes('已提交'),target);
   const job=service.store.jobs[0];assert.equal(job.machine,target);assert.equal(job.state,'PREPARING_DATA');assert.equal(job.project,'vision');assert.equal(job.release,release);
+  assert.equal(job.selectionSummary.storageVerified,true);assert.equal(job.selectionSummary.selectedMachine,target);
+  assert.ok(calls.some(c=>c.operation==='storage.training.plan'&&c.machine===target),'AUTO admission checks trusted target storage before accepting');
   assert.equal(usage(service.store.jobs,member.id),0);assert.equal(copied,0);
   assert.equal(requests.filter(r=>r.operation==='jobs.submit').length,1);
   await advanceDataPreparation(service,job,usage);assert.equal(job.state,'SUBMITTING');assert.equal(usage(service.store.jobs,member.id),1);assert.equal(copied,1);

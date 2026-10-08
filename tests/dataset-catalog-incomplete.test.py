@@ -56,12 +56,12 @@ class IncompleteCatalog(unittest.TestCase):
   p=self.paths['.registry'].parent/(self.version+'.json');p.write_text('{}');self.remove_parent('ready')
   with self.assertRaises(D.CacheError):self.cache.list_datasets(OWNER)
  def test_acl_revocation_during_unknown_validation_rejects(self):
-  self.remove_parent('ready');old=self.cache._record_snapshot
+  self.remove_parent('ready');old=self.cache._catalog_record_snapshot
   def revoke(*a,**k):
    r=old(*a,**k)
    if a[1]=='incomplete':D._write_json(self.paths['.registry'].parent/'dataset.json',{'schema':1,'owners':['other']})
    return r
-  with patch.object(self.cache,'_record_snapshot',side_effect=revoke):
+  with patch.object(self.cache,'_catalog_record_snapshot',side_effect=revoke):
    with self.assertRaises((PermissionError,D.CacheError)):self.cache.list_datasets(OWNER)
  def test_parent_disappears_after_summary_stays_unknown(self):
   old=self.cache._catalog_version
@@ -72,5 +72,41 @@ class IncompleteCatalog(unittest.TestCase):
   with patch.object(self.cache,'_catalog_version',side_effect=disappear):self.row()
  def test_unsafe_parent_link_is_not_absence(self):
   self.remove_parent('ready');self.paths['ready'].parent.symlink_to(self.root,target_is_directory=True)
+  with self.assertRaises((D.CacheError,OSError)):self.cache.list_datasets(OWNER)
+ def test_warm_unknown_does_not_reparse_even_in_a_new_cache_instance(self):
+  self.remove_parent('ready');self.row()
+  self.cache=D.DatasetCache(self.cache.root,reserve_bytes=0)
+  with patch.object(D,'_manifest_bytes',side_effect=AssertionError('UNKNOWN display reparsed immutable manifest')),\
+    patch.object(D,'_write_json',side_effect=AssertionError('warm UNKNOWN rewrote/fsynced summary')):
+   self.row();self.row()
+ def test_unknown_cache_is_bound_to_full_registration_identity(self):
+  self.remove_parent('ready');self.row()
+  path=self.paths['.registry'].parent/(self.version+'.json');body=path.read_bytes()
+  D._write_json(path,json.loads(body))
+  with patch.object(D,'_manifest_bytes',wraps=D._manifest_bytes) as parse:self.row()
+  self.assertEqual(parse.call_count,1)
+ def test_restored_parent_invalidates_unknown_and_can_only_claim_registered(self):
+  self.remove_parent('ready');self.row();D._mkdir(self.paths['ready'].parent)
+  with patch.object(D,'_manifest_bytes',wraps=D._manifest_bytes) as parse:
+   listing=self.cache.list_datasets(OWNER)
+  row=next(item for item in listing['datasets'] if item['dataset']=='incomplete')['versions'][0]
+  self.assertEqual(row['state'],'REGISTERED');self.assertEqual(parse.call_count,1)
+ def test_missing_parent_restored_during_unknown_summary_read_rejects(self):
+  self.remove_parent('ready');self.row();original=self.cache._catalog_summary
+  def restore(binding,value=None):
+   result=original(binding,value)
+   if binding.get('metadataIncomplete') and value is None:D._mkdir(self.paths['ready'].parent)
+   return result
+  with patch.object(self.cache,'_catalog_summary',side_effect=restore),self.assertRaises(D.CacheError):self.cache.list_datasets(OWNER)
+ def test_acl_revocation_during_warm_unknown_read_still_rejects(self):
+  self.remove_parent('ready');self.row();original=self.cache._catalog_summary
+  def revoke(binding,value=None):
+   result=original(binding,value)
+   if binding.get('metadataIncomplete') and value is None:D._write_json(self.paths['.registry'].parent/'dataset.json',{'schema':1,'owners':['other']})
+   return result
+  with patch.object(self.cache,'_catalog_summary',side_effect=revoke),self.assertRaises((PermissionError,D.CacheError)):self.cache.list_datasets(OWNER)
+ def test_warm_unknown_link_replacement_is_not_accepted_as_absence(self):
+  self.remove_parent('ready');self.row()
+  self.paths['ready'].parent.symlink_to(self.root,target_is_directory=True)
   with self.assertRaises((D.CacheError,OSError)):self.cache.list_datasets(OWNER)
 if __name__=='__main__':unittest.main()

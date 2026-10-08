@@ -11,6 +11,7 @@ import {chromium} from 'playwright';
 import {createPortalServer} from '../portal-server.mjs';
 import {MACHINES} from '../dist/machines.js';
 import {guardedRoute} from './browser-route-guard.mjs';
+import {trainingPlan,trainingSource} from './training-storage-fixture.mjs';
 
 const dir = await mkdtemp(join(tmpdir(), 'gpuq-datasets-browser-'));
 const screenshots = process.env.UI_SCREENSHOTS || '/tmp/gpuq-datasets-ui';
@@ -42,6 +43,14 @@ try {
     calls.push({machine, operation, args: structuredClone(args)});
     assert.ok(MACHINES.some(item => item.id === machine));
     if (operation === 'projects.list') return {projects: []};
+    if (operation === 'storage.training.plan') {
+      assert.equal(args.hostAdmin,false);
+      return trainingPlan(machine,args);
+    }
+    if (operation === 'datasets.training.status') {
+      assert.equal(args.hostAdmin,false);
+      return trainingSource(machine,args,{state:phases.get(machine)||'READY',bytes:128*1024**2,files:12,directories:0});
+    }
     if(operation==='datasets.upload.routes'){assert.equal(args.hostAdmin,false);assert.equal(args.uploadId,undefined);return {available:false,protocol:'dataset-upload-v1',reason:'not-configured',relayLimitBytes:256*1024**2};}
     if (operation === 'datasets.capacity') return {filesystemBytes:1024**4,availableBytes:512*1024**3,reserveBytes:10*1024**3,usableBytes:502*1024**3,totalInodes:100000,availableInodes:50000,inodeUsageKnown:true,guarded:true};
     if (operation === 'datasets.list') {

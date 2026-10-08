@@ -91,7 +91,8 @@ class SnapshotSyncTests(unittest.TestCase):
         with patch.object(n,'run',return_value=''),patch.object(n.projects(),'active',return_value=False):
             publishing=n.process('projects.publish',args)
             self.assertEqual(publishing['state'],'PUBLISHING')
-            self.assertEqual(n.projects().worker(publishing['operationId']),0)
+            task=n.projects().receipt(args)
+            self.assertEqual(n.projects().worker(publishing['operationId'],task['publicationId'],task['projectGeneration']),0)
             published=n.process('projects.status',args)
         self.assertEqual(published['state'],'READY')
         fixed=n.projects().store.release(USER,'imported',published['latestReadyRelease'])

@@ -1,7 +1,35 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {apiPost} from '../client-http.mjs';
+import {DemoClient} from '../dist/client.js';
 const url='https://portal.example';
+test('only authenticated admission status JSON carries a typed absence proof; gateway and wrong-operation errors do not',async()=>{
+ for(const [operation,status,body,expected] of [
+  ['datasets.upload.admission.status',404,JSON.stringify({error:'not admitted',code:'DATASET_ADMISSION_ABSENT'}),true],
+  ['datasets.upload.admission.create',404,JSON.stringify({error:'not admitted',code:'DATASET_ADMISSION_ABSENT'}),false],
+  ['datasets.upload.admission.status',503,JSON.stringify({error:'unknown',code:'DATASET_ADMISSION_ABSENT'}),false],
+  ['datasets.upload.admission.status',404,'<html>Not found</html>',false]
+ ]){
+  let calls=0;await assert.rejects(apiPost(url,'call',{operation,args:{}},{token:'fixture-token',fetchImpl:async()=>{
+   calls++;return new Response(body,{status});
+  }}),error=>error.status===status&&(error.code==='DATASET_ADMISSION_ABSENT')===expected);
+  assert.equal(calls,1);
+ }
+});
+test('browser transport preserves absence only for the matching status operation and exact HTTP/code tuple',async t=>{
+ const original=globalThis.fetch;t.after(()=>{globalThis.fetch=original;});
+ const client=new DemoClient();
+ for(const [operation,status,body,expected] of [
+  ['datasets.upload.admission.status',404,{error:'absent',code:'DATASET_ADMISSION_ABSENT'},true],
+  ['datasets.upload.admission.create',404,{error:'absent',code:'DATASET_ADMISSION_ABSENT'},false],
+  ['datasets.upload.admission.status',503,{error:'unknown',code:'DATASET_ADMISSION_ABSENT'},false],
+  ['datasets.upload.admission.status',404,'<html>Not found</html>',false]
+ ]){
+  globalThis.fetch=async()=>new Response(typeof body==='string'?body:JSON.stringify(body),{status});
+  await assert.rejects(client.transport('call',{operation,args:{}},'fixture-token'),
+   error=>error.status===status&&(error.code==='DATASET_ADMISSION_ABSENT')===expected);
+ }
+});
 function fixture(responses){const calls=[];return {calls,options:{sleep:async()=>{},fetchImpl:async(...args)=>{calls.push(args);const item=responses.shift();if(item instanceof Error)throw item;return item;}}};}
 test('read-only 502 during deployment retries and returns the actual status result',async()=>{
  const f=fixture([new Response('<html>Bad Gateway</html>',{status:502}),new Response(JSON.stringify({result:{state:'READY'}}))]);

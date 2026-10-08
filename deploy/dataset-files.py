@@ -48,11 +48,11 @@ def listing(node, args):
     # Authenticating the registry precedes version-lock creation. The same
     # exclusive lock used by GC and lease admission spans the complete page;
     # no persistent download lease, snapshot index or user workspace is made.
-    with cache._version_locked(actor, dataset, version, snapshot=True) as snapshot:
+    with cache._catalog_version_locked(actor, dataset, version) as snapshot:
         record, registration = snapshot
         manifest = record['manifest']
         paths = cache._paths(dataset, version)
-        with cache._locked():
+        with cache._catalog_read(actor, dataset):
             cache._check_snapshot(actor, dataset, version, registration)
             owners = owner_identity(module, paths)
         # Canonical manifest verification may read the bounded large manifest;
@@ -132,7 +132,7 @@ def listing(node, args):
                 raise ValueError('Published directory membership changed')
         if names and not entries:
             raise ValueError('Directory entry exceeds page bound')
-        with cache._locked():
+        with cache._catalog_read(actor, dataset):
             cache._check_snapshot(actor, dataset, version, registration)
             if owner_identity(module, paths) != owners:
                 raise ValueError('Dataset ownership metadata changed')

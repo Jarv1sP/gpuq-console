@@ -14,7 +14,7 @@
 
 响应为 `{result,principal}`，不附完整仪表盘 `state`，走已有的独立数据读取通道，不进入调度／账号写队列。最多 4 个并发数据读取请求；超过返回 429。不自动轮询，页面打开或用户刷新时查询即可。
 
-目录与容量并行读取，每台容量读取最多等待 4 秒，目录读取共享同一个 4 秒窗口。超时或报错的机器返回 `state:"UNKNOWN",reason:"timeout"`，顶层 `partial:true`，其余机器照常返回。成功容量快照在门户缓存 60 秒，命中时保留原 `collectedAt` 和节点 `checkedAt`；顶层 `checkedAt` 只是本次门户查询时间。缓存过期后读取失败，不返回旧字节。
+目录与容量并行读取，每台容量读取最多等待 4 秒，目录读取共享同一个 4 秒窗口。超时或报错的机器返回 `state:"UNKNOWN",reason:"timeout"`，顶层 `partial:true`，其余机器照常返回。成功容量快照在门户缓存 60 秒，命中时保留原 `collectedAt` 和节点 `checkedAt`；顶层 `checkedAt` 只是本次门户查询时间。缓存过期后读取失败，不返回旧字节。任一节点不可读时不能以其他节点的容量替代；返回前仍重验当前账号授权。
 
 本接口不授予文件下载、终端、复制或删除权限。`filePreviewAvailable` 仅在本账号有已确认 READY 固定源、且该源节点新鲜容量事实支持 `datasetFileList:1` 时为 true；目录入口仍须逐数据集调用[固定版本目录预览](DATASET_FILES.md)并重新鉴权。旧／未知节点为 false，不拿目录元数据可见性替代文件读取权。`fileContentPreviewAvailable:false` 明确本次尚无正文预览 API。既有上传、准备、租约、复制、释放和删除保留原围栏。
 
@@ -113,6 +113,7 @@
 ## 配套与验收
 
 - 配套节点 `datasets.capacity` 增加 `storageOverview.protocol:"dataset-storage-node-v1"`，含独立 `cache.volume/budgetBytes/projectBytes/projectUsageComplete/projectCollectedAt` 与实际配置的 `warehouse.volume`。卷容量读取常数时间；项目用量仅有界缓存采样，不扫描 dataset payload 或完整清单，不创建第二登记表。
+- 已明确启用的单根权威仓库（本机固定归档源、`storageAuthority.enabled:true`、未启用缓存分层且没有双根 `storageWarehouse`）复用同一次受管卷快照。仓库与工作层显示相同 `volume.id`，`physicalVolumes` 只计一次，并保留 `CACHE_WAREHOUSE_SHARED_VOLUME` 提醒；没有专用缓存预算时为 null。关闭 authority 不推断仓库，配置矛盾或容量未知不冒称可用。容量角色不证明任何固定版本 `warehouseReady`，也不启用上传或仓库直读。
 - 门户新文件 `dataset-storage-overview.mjs`、读取路由、维护期只读 allow-list 和运行镜像 COPY 必须一起安装。
 - 修改节点执行器会改变其 SHA；正在迁移的环境须由维护负责人先协调固定 SHA／root pin，再部署，不能绕过迁移围栏。
 - 测试：`node --test tests/dataset-storage-overview.test.js tests/dataset-catalog-visibility.test.js tests/dataset-storage-overview-http.test.js`；Python 3.12：`TMPDIR=/private/tmp python3.12 tests/storage-capacity-overview.test.py`。生产验收另看真实节点的完整协议、物理卷和容量快照；本地 fixture 不证明上线。

@@ -127,6 +127,26 @@ ProjectOps 只认可绑定完整原收据摘要及快照 inode 的证明；单�
 
 后端只读筛选机器后，将唯一实际 `machine`、原提交 `digest`、`machineSelection` 和 `projectPreparation:{from,project,release,state,operationId?}` 随任务落库。项目／数据准备阶段为 `PREPARING_DATA`，不占 GPU 额度；后续逐阶段重新检查权限、维护、固定版本和额度。超时、刷新或重启只能观察这个目标和原操作，不能换机器或新建提交键。UI 展示实际 `machine`，用 `projectPreparation.state` 与 `dataPreparation` 显示进度；不把准备中的任务误画成已拿到显卡。
 
+### 项目／缓存容量准入与仓库只读训练
+
+配套新版 AUTO 候选须先通过 `training-storage-plan-v1` 的真实节点只读核验：固定项目代码与展开镜像、数据版本清单、卷 byte/inode 可用、管理员预留、已有传输预约、缓存预算和已启用内核配额。相同物理卷只算一份可用容量，不减去界面上的 `projectBytes` 再扣一次；查询未知、旧协议或不足均排除。明确服务器则返回错误，不改选、自动删除或使用系统盘。准备前与首次派发前重新核对；慢 RPC 不占全局写队列，取消、撤权、维护或规格变化使旧结果失效。
+
+计划是内部时点准入，不返回客户端或写入 native spec，不预占未来 checkpoint/输出。节点实际写入与启动仍保留独立的实时卷守卫。旧已尝试任务和没有新计划标记的历史任务不追溯改变同步或取消规则。
+
+`jobs.submit` 可选 `datasetReadMode:"warehouse"`；省略或 `"cache"` 保留原摘要和 node spec。warehouse 需要固定个人项目、明确数据版本及正常 owner-only 读取权限；只有所选机器本地 authority 仓库的固定 READY 版本可用。内核只读挂载仍为 `/data2/<logical dataset>`，持久读取租约固定 mode、机器、authority 与源根身份，注销／回收围栏仍有效。节点离线、非仓库节点、未确认或缺权限时拒绝，不回落缓存／其他节点。AUTO + warehouse 只在本地拥有全部仓库版本的合法候选中选机。CLI 对应 `--data-read warehouse`；前端能力未实机确认前不开放切换。
+
+只读内部 `datasets.training.status` 与 `storage.training.plan` 仅走正常训练执行桥，不扩展元数据或上传 forced key。客户端不提交 `projectFootprint`、`datasetFootprints`、物理路径、authority、容量计划或 hostAdmin；前端仍仅提交原固定项目和数据声明。
+
+缺失缓存的准备也必须配套新的私有 `storage.training.prepare` 执行路径：Portal 在原作业／传输记录中先保存完整 spec、容量请求和原准备编号，节点按同一固定账号、版本、源／目标及不可变运行时执行。旧记录不自动升级；丢回执只查原操作，取消仍须证明原 worker 停止，UNKNOWN 保留原保护。分离运行时和执行桥的完整配套未确认前不能开放新训练准备，不能回退旧 worker、自动回收缓存或生成第二条传输。该内部上下文不接受客户端选择，也不投影到公开作业／传输响应。
+
+前端预检使用认证只读 `datasets.training.capabilities {machine,dataset,version}`，只能传这三个固定字段。返回 `{protocol:1,machine,dataset,version,warehouse:{available,reason}}`；`reason` 为 `null`、`maintenance`、`offline`、`protocol-unavailable`、`unverified`、`forbidden`、`machine-not-warehouse` 或 `not-ready`。这不是容量预留或训练授权，提交时仍重核全部条件；维护或旧／未知节点不开放仓库直读。查询走有界独立数据读取 lane，不等待全局写队列，前后重新验证登录与授权，不泄露物理源。
+
+已确认容量不足的提交返回 HTTP409、`code:"SUBMISSION_REJECTED"`；容量／协议无法确认返回503、同一 code。可附 `storage:{protocol:1,reasonCode:"TRAINING_STORAGE_INSUFFICIENT"|"TRAINING_STORAGE_UNKNOWN",requiredBytes,availableBytes,volumes}`。顶层数字仅在唯一确认的物理字节不足时为非负整数，否则为 null；UNKNOWN 为全 null 和空 volumes。已确认行仅含 `roles:["project"|"cache"]`、`requiredBytes/availableBytes/requiredInodes/availableInodes`；available 已扣预留和在途承诺。文件数、预算或多项限制不足时显示错误原文，不拿磁盘物理 free 伪造统一可用数字。不会返回内部计划、owner、路径或设备身份。
+
+AUTO 成功回执的 `machine` 是已持久保存的最终目标，另附 `selectionSummary:{protocol:1,selectedMachine,reason:"storage-fit-and-resource-rank",storageVerified,gpuPoolAvailable,queuedJobs,localProject,localDatasetCount,observedAt,storageExcluded:[{machine,reason:"storage-insufficient"|"storage-unverified"}]}`。它只解释本次选择时的授权候选、容量与资源快照，不承诺未来卡位或磁盘；没有合适目标则拒绝，不创建任务，排队后不自动改派。
+
+结果继续用本人认证的 `files.list/get {machine:job.machine,project:job.project,area:"output",runId:job.id,path,...}` 或 `gpuctl pull REMOTE_FILE LOCAL_FILE --machine MACHINE --project PROJECT --job JOB_UUID`，不能使用开发机代替实际执行机。页面可按终态提醒保存结果，`jobs.completion` 可另核实成功证明；当前没有可靠结果总大小或“已下载”历史，不虚构这些字段，也不自动清除输出。
+
 个人累计用卡额度只约束普通成员；当前启用的管理员对共享、独占、手选和 AUTO 一致豁免。单任务物理卡数、显存、能力、owner-only 数据授权、优先级和显式让位规则不变，资源不足交给节点排队；不清除既有任务或租约，也不更改成员原始额度。全平台 5000 条历史和每人 10 个准备中任务的上限保留。新任务内部 `dispatchPending:true` 随记录持久化（不下发到节点或返回客户端）；首次 sync 在串行队列内重验当前角色/启用状态、机器和个人额度及管理员专属优先级，先持久化标记为 false 再开始远程调用，等待回包不占用串行队列。降级后未派发任务不沿用管理员豁免；已尝试派发、旧无标记或回执未知任务继续原同步路径，不凭角色变化停止训练或释放资源。该标记不是节点成功证明。
 
 后台任务核对每台机器保留一个首次派发／取消通道和一个既有任务观察通道，最多两个在途操作，同一任务始终只有一个。新任务能加入正在进行的核对，不等待其他机器或旧任务列表全部查完；既有任务仍按原顺序获得独立观察通道。每轮同一阶段只尝试一次，首次回包丢失不会在该轮立即重新 sync。取消先等待该任务自身在途操作结束，不并发取消与 sync；UNKNOWN 仍保留额度和原编号。此调度不绕过全局持久写队列、当前授权、维护门禁或节点排队，也不保证节点／网络故障时的启动时间。
@@ -197,6 +217,8 @@ ProjectOps 只认可绑定完整原收据摘要及快照 inode 的证明；单�
 
 项目锁竞争最多等待两秒取得原锁，超时返回可识别 busy；不重试操作体，也不改变 service-owned、单链接、私人权限或 no-follow 条件。`datasets.prepare` 内部目录鉴权使用数据库当前角色，个人数据传输仍使用 owner-only member 身份，管理员不因此获得其他账号材料。
 
+`datasets.workspace.status` 的个人发布回执可含 `phase`（`SCANNING/REGISTERING/REGISTERED/ARCHIVE_INTENT/MATERIALIZING/COMPLETED`）。已确认登记的 `dataset/version/files/bytes` 在后续失败中保持；登记前不推断版本已存在。取锁失败可含 `failureKind:CACHE_BUSY` 与 `lockWait:{scope:CACHE|VERSION,limit:SINGLE_WAIT|TOTAL_BUDGET,timeoutSeconds:number}`，只解释已耗尽的等待边界，不返回锁路径或持锁者。旧回执无字段仍按未知；只读查询和重复原 key 不重新派发。明确 FAILED 后的受支持显式发布使用新 key、原目录和原名称，未变内容复用相同版本与已校验片段；集中仓库的旧发布禁用策略保持。
+
 `files.upload.status {machine,project,area:"code",path,totalSize,sha256,uploadId?}` 仅查询当前账号的精确项目文件；首次可省略 `uploadId`，发现同路径、同大小、同完整 SHA 的现存上传。返回 `protocol:2` 及 `ABSENT / UPLOADING / COMPLETE / CONFLICT`；已知上传含原 `uploadId`、`receivedBytes`。`UPLOADING` 还必须有 `resumable:true` 才能续传。维护期间仍可查状态，不能借它写文件、发布或提交任务。
 
 项目 `files.put` 的固定身份由账号、项目、路径、总长度、SHA256、uploadId 共同绑定。中间块重复发送同 offset/bytes 不会追加；最终提交保留完成回执，查询和原最终块恢复会核验目标内容及身份。已提交的目标被他人编辑或替换会拒绝恢复，不回滚或覆盖新内容。rename 已完成但最终回执尚未写入时，保留的 COMMITTING 意图用于核验结果，此时状态为 `COMPLETE,completionPending:true`；客户端须保持原 ID，在 `offset=totalSize` 发送空的 final 块收尾后才可发布，查询本身不写入。不能仅凭项目旧 READY 版本推断这次上传成功。
@@ -239,6 +261,10 @@ ID/revision 核对。维护状态仍保持；物理原件、副本、租约与 p
 启用机械仓库策略后的新版客户端，新上传必须 allocation-first：只有本地没有旧 UUID／handle 时，先持久保存固定 intent UUID，调用 `datasets.upload.admission.create {machine,key,name,manifestBytes,manifestSha256,totalBytes,entries}`。门户在同一事务内持久绑定 owner、intent、随机服务器 `uploadId`、原 `requestedMachine`、固定 HDD `storageMachine`、authority 和完整 specification；回包 `protocol:"dataset-upload-admission-v1"`、原 `key`、`uploadId`、`requestedMachine/storageMachine/storageTier:"hdd"`、`specification`、`state:"ISSUED"|"BOUND"`。客户端保存回包后，以下 begin 的 `key` 使用该服务器 `uploadId`，`machine` 仍是原训练选择。分配丢 ACK 只调用 `datasets.upload.admission.status {machine,key}` 查询原映射（零节点 RPC），不存在或未知就停止，不换 key；`BOUND` 表示固定派发意图，不是节点成功证明。此路径不扫描无关旧节点；节点私有准入仅接受受信桥的完整固定 tuple，拒绝 legacy 会话和身份变更，未知能力或失败不回退旧 begin。
 
 已有本地 UUID／handle 不自动 allocation 或重绑，仍按原 begin/status、全节点定位及原位置恢复；超时或离线不是 ABSENT，全节点确认 ABSENT 后也拒绝用旧裸 key 新建。策略启用时，新 `transfers.create kind=upload`／`transfer upload` 关闭，已持久传输仍按原 key/编号恢复。`state.datasetUploadAdmission {protocol:1,available}` 只说明门户策略/API，不能代替节点准入、容量、挂载或直传可达证明。
+
+管理员可在独立 ingress 策略配置 `warehouses`，新 admission 按完整清单实际空间需求选择首个合格仓库，再原子固定 UUID、仓库及 authority；不新增用户选盘参数。容量告警本身不拒绝上传，实际不足、不可写或未知拒绝。`datasetUploadAdmission.targetMachine` 只是默认仓库预览；确定的写入位置始终使用 admission 的 `storageMachine`，续传、取消、签票都不能重新选择。新池上传 READY 事件与原 intent 匹配后在所属仓库核验，缓存认证沿固定 transfer 来源；旧 outbox、归档策略、journal 和 pins 不重写。配置及兼容边界见 [DATASET_INGRESS.md](DATASET_INGRESS.md)。
+
+准入恢复的窄例外：`admission.status` 在授权有效、原映射不存在且无同 intent 在途检查时，返回 `404` 与 `code:"DATASET_ADMISSION_ABSENT"`。只有下一次用户明确发起相同规格上传时，客户端才可沿原 key 再调一次 create；初次失败只核对状态，保留容量/不可达原因。普通网关 404、超时、未知和已有 UUID 不自动重派。停用入口池不撤销 BOUND/ARCHIVED 的持久来源身份与历史别名。
 
 仅管理员受保护入库配置 `allowDuringMaintenance:true` 可在维护期间放行当前服务端 admission 绑定的固定 HDD 上传；仍逐次复核 owner、机器权限、authority、spec 和节点容量，不接受客户端传该开关。此例外不修改 operational maintenance revision/global 状态，不放行训练、终端、项目、SSD／legacy 新建、通用传输或缓存准备，不能宣称全平台恢复。
 

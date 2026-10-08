@@ -315,6 +315,22 @@ class ProjectStore:
     def environment_mode(self, user, slug):
         return self._project(user, slug)[1].get('environmentMode', 'shared')
 
+    @project_lifetime
+    def generation(self, user, slug):
+        """Local incarnation identity; a same-name replacement is not this project."""
+        path, meta = self._project(user, slug)
+        with directory(path) as fd:
+            info = os.fstat(fd)
+            current = read_json(path / 'project.json')
+            if current != meta:
+                fail('changed', 'Project metadata changed while identifying its generation')
+            with directory(path) as current_fd:
+                now = os.fstat(current_fd)
+                if (info.st_dev, info.st_ino) != (now.st_dev, now.st_ino):
+                    fail('changed', 'Project directory changed while identifying its generation')
+            return digest({'device': info.st_dev, 'inode': info.st_ino,
+                           'createdAt': meta['createdAt']})
+
     @contextlib.contextmanager
     def _file_lock(self, path, blocking=False):
         fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)

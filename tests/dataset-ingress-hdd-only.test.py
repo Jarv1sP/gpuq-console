@@ -87,7 +87,7 @@ class HddIngress(unittest.TestCase):
 
     def test_public_request_cannot_supply_private_preparation_scope(self):
         result, args, _, _=self.admit();self.cache_only()
-        for field in ('_peer_cache_preparation','cachePreparation','_archive_transfer','storageTier'):
+        for field in ('_peer_cache_preparation','cachePreparation','_archive_transfer','storageTier','sourcePolicy'):
             with self.subTest(field=field),self.assertRaises(ValueError):
                 self.call('begin',**args,**{field:True})
 
@@ -152,6 +152,31 @@ class WarehouseCopy(unittest.TestCase):
         self.assertEqual(self.dst.status(self.control())['state'],'PAUSED')
         self.assertFalse(self.target.dataset_uploads().folder(T.USER,self.key).exists())
         self.assertEqual(self.src.load(self.key,'.source-lease.json')['state'],'HELD')
+
+    def test_second_explicit_warehouse_uses_real_pinned_transfer_and_immutable_version(self):
+        self.cache_only(source='different-warehouse')
+        self.target.CONFIG['storageAuthorities']={'second-hdd':{'machine':'gpu-1'}}
+        self.dst.start(self.args)
+        self.assertEqual(self.dst.worker(self.key,1),0,self.dst.load(self.key,'.result.json'))
+        self.assertEqual(self.dst.status(self.control())['state'],'SUCCEEDED')
+        self.assertEqual(self.dst.status(self.control())['version'],self.version)
+
+    def test_explicit_warehouse_scope_rechecks_mapping_and_peer_and_durable_identity(self):
+        self.cache_only(source='different-warehouse')
+        self.target.CONFIG['storageAuthorities']={'second-hdd':{'machine':'gpu-1'}}
+        self.dst.start(self.args);spec=self.dst.load(self.key);uploads=self.target.dataset_uploads()
+        with uploads._peer_cache_preparation(spec):
+            original=self.target.CONFIG['storageAuthorities']['second-hdd']
+            self.target.CONFIG['storageAuthorities']['second-hdd']={'machine':'other'}
+            with self.assertRaises(PermissionError):uploads.require_ingress(T.USER,self.key)
+            self.target.CONFIG['storageAuthorities']['second-hdd']=original
+            peer=self.target.CONFIG['transferPeers'].pop('gpu-1')
+            with self.assertRaises(PermissionError):uploads.require_ingress(T.USER,self.key)
+            self.target.CONFIG['transferPeers']['gpu-1']=peer
+            with self.assertRaises(PermissionError):
+                with uploads._peer_cache_preparation({**spec,'name':'changed'}):pass
+            self.target.atomic_json(self.dst.path(self.key,'.cancel'),{'userId':T.USER})
+            with self.assertRaises(PermissionError):uploads.require_ingress(T.USER,self.key)
 
     def test_scope_cannot_change_owner_or_outlive_cancellation(self):
         self.cache_only();self.dst.start(self.args);spec=self.dst.load(self.key)

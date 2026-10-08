@@ -208,7 +208,8 @@ def rpc_fixture():
                     elif op=='fixture.publish':
                         with patch.object(fixture.node,'run',return_value=''):
                             start=fixture.node.process('projects.publish',{**fixture.args,'key':str(uuid.uuid4())})
-                        if fixture.ops.worker(start['operationId'])!=0:raise RuntimeError('Isolated publication failed: '+str(fixture.ops.pending(fixture.args).get('error')))
+                        task=fixture.ops.receipt(fixture.args)
+                        if fixture.ops.worker(start['operationId'],task['publicationId'],task['projectGeneration'])!=0:raise RuntimeError('Isolated publication failed: '+str(fixture.ops.pending(fixture.args).get('error')))
                         status=fixture.node.process('projects.status',fixture.args)
                         result={'state':status['state'],'publication':status['publication'],'release':status['latestReadyRelease']}
                     else:result=fixture.node.process(op,{**args,**fixture.args})

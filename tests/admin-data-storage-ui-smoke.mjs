@@ -18,7 +18,7 @@ const records=[];
 try{
   await mkdir(out,{recursive:true});
   for(const role of ['member','admin'])for(const width of [1440,1024,390,320]){
-    const context=await browser.newContext({viewport:{width,height:1000},reducedMotion:'reduce'}),page=await context.newPage(),calls=[],errors=[],pins=new Set(['foreign-pin']);let losePin=false,denyPinStatus=false,cloudDisabled=true,lostReconnect=false,measuredUsage=false;
+    const context=await browser.newContext({viewport:{width,height:1000},reducedMotion:'reduce'}),page=await context.newPage(),calls=[],errors=[],pins=new Set(['foreign-pin']);let losePin=false,denyPinStatus=false,cloudDisabled=true,lostReconnect=false,measuredUsage=false,damagedList=false,missingCatalog=false;
     page.on('pageerror',error=>errors.push(error.message));
     await context.route('**/*',async route=>{
       const url=new URL(route.request().url());assert.equal(url.origin,origin,'no external request');
@@ -27,10 +27,16 @@ try{
         const {operation,args={}}=route.request().postDataJSON();calls.push({operation,args});
         assert.equal(role,'admin','member sends zero privileged API requests');
         const reply=value=>route.fulfill({contentType:'application/json',body:JSON.stringify(value)});
-        if(operation==='datasets.list')return reply({datasets:[{dataset:'samples',ownerLabel:'所属用户：陈宇轩',versions:[{version,state:'READY',bytes:7*1024**3,files:120,warehouseReady:args.machine===machines.at(-1).id}]},{dataset:'shared-data',ownerLabel:'共享授权用户：陈宇轩、bob',versions:[{version,state:'READY',bytes:2*1024**3,files:50,warehouseReady:false}]},{dataset:'empty-work',ownerLabel:'所属用户：bob',versions:[]}]});
+        if(operation==='datasets.list')return reply({datasets:[{dataset:'samples',ownerLabel:'所属用户：陈宇轩',versions:[{version,state:damagedList&&args.machine===machines.at(-1).id?'UNKNOWN':'READY',bytes:damagedList&&args.machine===machines.at(-1).id?1:7*1024**3,files:120,warehouseReady:!damagedList&&args.machine===machines.at(-1).id}]},{dataset:'shared-data',ownerLabel:'共享授权用户：陈宇轩、bob',versions:[{version,state:'READY',bytes:2*1024**3,files:50,warehouseReady:false}]},{dataset:'empty-work',ownerLabel:'所属用户：bob',versions:[]}]});
         if(operation==='datasets.overview'){assert.deepEqual(args,{});return reply({protocol:0});}
         if(operation==='storage.usage.users'){assert.deepEqual(args,{});return reply({protocol:1,users:measuredUsage?[{userId:'chen-id',label:'陈宇轩',machines:machines.map(row=>({machine:row.id,available:true,collectedAt:'2026-10-08T06:00:00Z',complete:true,projectBytes:3*1024**3,projects:[{project:'train',name:'train',bytes:3*1024**3}]}))}]:[]});}
-        if(operation==='datasets.catalog')return reply({machine:args.machine,datasetDelete:0,partial:false,machines:machines.map(row=>({machine:row.id,state:'ok'})),datasets:[{dataset:'samples',versions:[{version,locations:[{machine:machines[0].id,dataset:'samples',storage:{dataset:'samples',version,phase:'ARCHIVED',originalRetained:true,archiveMachine:machines.at(-1).id}}]}]}]});
+        if(operation==='datasets.catalog'){
+          if(missingCatalog)return route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({error:'目录待确认'})});
+          return reply({machine:args.machine,datasetDelete:0,partial:false,machines:machines.map(row=>({machine:row.id,state:'ok'})),datasets:[
+            {dataset:'samples',versions:[{version,bytes:7*1024**3,files:120,locations:machines.map(row=>({machine:row.id,dataset:'samples',state:'READY',warehouseReady:row.id===machines.at(-1).id,contentBytes:7*1024**3,ownerLabel:'所属用户：陈宇轩'}))}]},
+            {dataset:'shared-data',versions:[{version,bytes:2*1024**3,files:50,locations:machines.map(row=>({machine:row.id,dataset:'shared-data',state:'READY',warehouseReady:false,contentBytes:2*1024**3,ownerLabel:'共享授权用户：陈宇轩、bob'}))}]}
+          ]});
+        }
         if(operation==='datasets.storage.status'){
           if(denyPinStatus&&args.pinId)return route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({error:'原保留状态待确认'})});
           return reply({enabled:true,...(args.dataset?{version:{dataset:args.dataset,version:args.version,state:'READY',pinCount:pins.size,manualPinProtocol:1,...(args.pinId?{manualPin:{pinId:args.pinId,owner:'fixture-admin',present:pins.has(args.pinId)}}:{})}}:{})});
@@ -123,6 +129,29 @@ try{
       assert.equal(calls.filter(row=>row.operation==='datasets.storage.pin').length,2,'status reconciles the original pin, never sends a replacement');
       assert.equal(calls.filter(row=>row.operation==='datasets.storage.status').at(-1).args.pinId,uncertain.args.pinId);
       assert(pins.has('foreign-pin'));
+    }
+    if(width===1440){
+      damagedList=true;await page.locator('[data-storage-refresh]').click();await page.waitForFunction(()=>!document.querySelector('[data-storage-refresh]').disabled);
+      assert.equal(await page.locator('.storage-warehouse-badge').count(),1,'catalog warehouse READY survives a lost list READY');
+      assert.equal(await page.locator('.storage-server-card').last().locator('.storage-warehouse-badge').textContent(),'仓库','badge remains on the exact catalog machine');
+      await page.locator('[data-storage-view=members]').click();
+      assert.equal(await chen.locator('[data-member-size=warehouse]').textContent(),'7.00 GiB','warehouse bytes do not use damaged list bytes');
+      assert.equal(await bob.locator('[data-member-size=warehouse]').textContent(),'0 B');
+      if(await chen.locator('button').getAttribute('aria-expanded')!=='true')await chen.locator('button').click();
+      assert.equal(await chen.locator('button').getAttribute('aria-expanded'),'true');
+      const target=page.locator('.storage-member-grid>div').filter({has:page.locator('.server-id[title="'+machines.at(-1).id+'"]')});
+      assert.match(await target.textContent(),/仓库 1 个数据集 · 7.00 GiB/,'machine warehouse count and size come from catalog');
+      await page.screenshot({path:join(out,'catalog-ready-list-damaged-'+width+'.png'),fullPage:true});
+      await page.locator('[data-storage-view=servers]').click();
+      await page.screenshot({path:join(out,'catalog-ready-badge-'+width+'.png'),fullPage:true});
+      missingCatalog=true;await page.locator('[data-storage-refresh]').click();await page.waitForFunction(()=>!document.querySelector('[data-storage-refresh]').disabled);
+      assert.equal(await page.locator('.storage-warehouse-badge').count(),0,'list must not prove warehouse READY when catalog is unavailable');
+      assert.equal(await page.locator('.storage-warehouse-pending').count(),machines.length);
+      await page.locator('[data-storage-view=members]').click();
+      assert.equal(await chen.locator('[data-member-size=warehouse]').textContent(),'待确认');
+      assert.equal(await bob.locator('[data-member-size=warehouse]').textContent(),'待确认');
+      await page.screenshot({path:join(out,'warehouse-unconfirmed-'+width+'.png'),fullPage:true});
+      await page.locator('[data-storage-view=servers]').click();
     }
     if(width===1440){await page.evaluate(()=>{store.data.users=[{id:store.principal.userId,enabled:true,limits:{}}];store.data.operationalMaintenance={version:1,global:{reason:'local maintenance'},machines:{}};});await page.locator('#cloud-auth-reconnect').click();await page.getByText('云盘已连接。',{exact:true}).waitFor();assert.equal(calls.filter(row=>row.operation==='cloud.auth.reconnect').length,1,'admin global connection is independent of server quota/maintenance');assert.equal(await page.locator('#cloud-auth-disconnect').isVisible(),true,'disconnect is available only after a confirmed connection');lostReconnect=true;await page.locator('#cloud-auth-reconnect').click();await page.getByText('重新连接结果待确认，请重新查询。',{exact:true}).waitFor();assert.equal(calls.filter(row=>row.operation==='cloud.auth.reconnect').length,2);await page.locator('#cloud-auth-info').click();await page.getByText('云盘已连接。',{exact:true}).waitFor();assert.equal(calls.filter(row=>row.operation==='cloud.auth.reconnect').length,2,'lost receipt causes only an explicit status read, never replay');const count=calls.length;await page.evaluate(()=>{store.principal={userId:'other-member',role:'member'};store.authGeneration++;document.querySelector('#cloud-auth-reconnect').disabled=false;document.querySelector('#cloud-auth-reconnect').click();});await page.waitForTimeout(50);assert.equal(calls.length,count,'role revocation prevents reconnect even after DOM tampering');}
     const before=calls.length;await page.evaluate(()=>storageModule.destroy());await page.waitForTimeout(100);assert.equal(calls.length,before,'unmount stops reads and polling');assert.equal(await page.locator('#storage-fixture>*').count(),0);

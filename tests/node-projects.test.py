@@ -40,6 +40,9 @@ class NodeProjects(unittest.TestCase):
                 if not path.is_symlink():os.chmod(path,0o600)
         self.temp.cleanup()
     def call(self,op,**args):return self.n.process(op,{**self.args,**args})
+    def publication_worker(self, operation):
+        task=self.ops.receipt(self.args)
+        return self.ops.worker(operation,task['publicationId'],task['projectGeneration'])
     def upload(self,data=b'hello',**args):
         fields={'path':'train.py','uploadId':str(uuid.uuid4()),'totalSize':len(data),'sha256':hashlib.sha256(data).hexdigest(),'final':True,'offset':0,'data':base64.b64encode(data).decode()}
         with patch.object(self.ops,'active',return_value=False):return self.call('files.put',**{**fields,**args})
@@ -125,7 +128,7 @@ class NodeProjects(unittest.TestCase):
         with patch.object(self.n,'run',return_value=''):
             out=self.call('projects.publish')
         self.assertEqual(out['state'],'PUBLISHING')
-        self.assertEqual(self.ops.worker(out['operationId']),0)
+        self.assertEqual(self.publication_worker(out['operationId']),0)
         status=self.call('projects.status');self.assertEqual(status['state'],'READY')
         self.assertEqual(self.call('projects.verify',release=status['latestReadyRelease'])['state'],'READY')
     def test_unknown_terminal_state_blocks_publication(self):

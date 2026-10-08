@@ -257,7 +257,12 @@ test('single warehouse intake separates complete warehouse data from prepared tr
   assert.match(guide,/先确认内容、解压大小和剩余空间，再登记完整数据集/);
   assert.match(guide,/不会自动解压/);
   assert.match(guide,/不要把训练缓存当作长期数据仓库/);
-  assert.match(guide,/仓库所在机器也须完成准备，不能把仓库数据可用当作训练缓存已就绪/);
+  assert.match(guide,/仓库所在机器默认也须完成准备，不能把仓库数据可用当作训练缓存已就绪/);
+  assert.match(guide,/仅当所选服务器已确认支持、固定版本在它自己的仓库为 `READY`/);
+  assert.match(guide,/--data-read warehouse/);
+  assert.match(guide,/仓库离线、未确认或权限不足会拒绝，不改走其他服务器、不自动生成缓存/);
+  assert.match(guide,/调试可以在现有项目的 `debug-data\/` 放少量人工样本/);
+  assert.match(guide,/不要为一次调试新建容器或登记小数据集/);
   assert.match(guide,/具体存储介质由平台按节点实际能力管理/);
   assert.match(guide,/日常只需使用个人工作区和完整数据仓库/);
   assert.match(guide,/三个板块分别是个人项目／容器.*集中数据仓库.*算力排队/);

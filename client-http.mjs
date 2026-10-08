@@ -33,7 +33,9 @@ export async function apiPost(base,path,body,{token,signal,fetchImpl=fetch,sleep
     if(read&&TRANSIENT.has(response.status)&&attempt<READ_RETRY_DELAYS.length&&!combined.aborted){await sleep(READ_RETRY_DELAYS[attempt],combined);continue;}
     if(!response.ok){
       const detail=decoded&&typeof data.error==='string'?safe(data.error):TRANSIENT.has(response.status)?'服务暂时不可用或正在更新':response.status===404?'API 路径不存在，请检查服务地址':'服务返回了非 JSON 错误响应';
-      throw error(`${safe(operation)}：HTTP ${response.status} — ${detail}${!read&&TRANSIENT.has(response.status)?'；操作结果尚未确认，请先查询状态，不要更换提交键重复提交。':''}`,response.status);
+      const failure=error(`${safe(operation)}：HTTP ${response.status} — ${detail}${!read&&TRANSIENT.has(response.status)?'；操作结果尚未确认，请先查询状态，不要更换提交键重复提交。':''}`,response.status);
+      if(operation==='datasets.upload.admission.status'&&response.status===404&&decoded&&data.code==='DATASET_ADMISSION_ABSENT')failure.code=data.code;
+      throw failure;
     }
     if(!decoded)throw error(`${safe(operation)}：HTTP ${response.status}，API 未返回有效 JSON。请检查服务地址或网关；不能据此判定数据或操作失败。`,response.status);
     return data;

@@ -16,6 +16,7 @@ import {chromium} from 'playwright';
 import {createPortalServer} from '../portal-server.mjs';
 import {MACHINES} from '../dist/machines.js';
 import {mockCampusFiles} from './personal-file-campus-mock.mjs';
+import {projectFootprint,trainingPlan,trainingSource} from './training-storage-fixture.mjs';
 
 const folder=await mkdtemp(join(tmpdir(),'gpuq-project-ui-'));
 const screenshots=process.env.UI_SCREENSHOTS||'/tmp/gpuq-projects-ui';
@@ -44,6 +45,14 @@ try{
       project.state='PUBLISHING';project.progress={phase:'copying',completedEntries:12,completedBytes:512,totalEntries:20,totalBytes:1024};return copy(project);
     }
     if(operation==='projects.verify'){assert.ok(project?.releases.some(item=>item.release===args.release&&item.state==='READY'));return {project:args.project,release:args.release,state:'READY'};}
+    if(operation==='projects.copy.probe'){
+      assert.equal(project?.environmentMode,'oci');
+      assert.ok(project.releases.some(item=>item.release===args.release&&item.state==='READY'));
+      return {protocol:'portable-project-v1',enabled:true,environmentMode:'oci',architecture:'amd64',
+        project:args.project,release:args.release,image:'sha256:'+'d'.repeat(64),releaseReady:true,sources:[node],...projectFootprint};
+    }
+    if(operation==='storage.training.plan'){assert.equal(args.hostAdmin,false);return trainingPlan(node,args);}
+    if(operation==='datasets.training.status'){assert.equal(args.hostAdmin,false);return trainingSource(node,args,{bytes:16,files:1,directories:0});}
     if(operation==='terminal.open'){const id=args.mode==='reconnect'?args.id:randomUUID(),writerToken=randomUUID();if(args.hostAdmin){assert.equal(args.userId,'builtin-admin');assert.equal(args.project,undefined);}if(args.mode==='reconnect')assert.ok(terminals.has(id));terminals.set(id,{...copy(args),machine:node,writerToken});if(terminalGate){const gate=terminalGate;terminalGate=null;await gate;}return {id,writerToken};}
     if(operation==='terminal.exchange'){
       const session=terminals.get(args.id);assert.ok(session);assert.equal(args.project,session.project);assert.equal(args.hostAdmin,session.hostAdmin);assert.equal(node,session.machine);assert.equal(args.writerToken,session.writerToken);

@@ -11,6 +11,17 @@ global batch 的单进程参考在 FP64 容差 1e-12 内一致。另测三 rank 
 
 ## 每个 PR 的离线自动测试
 
+训练存储准入由 `training-storage.test.js/.py`、`personal-oci-inodes.test.py`、
+`training-storage-dispatch.test.js` 与 AUTO 回归覆盖真实 byte/inode、展开镜像、
+同卷去重、预留／在途占用、旧／未知能力、固定目标及准备／派发前重新验证。
+`training-dataset-capabilities.test.js`、`training-datasets.test.js` 和
+`dataset-training-source.test.py` 分别验证公开只读投影、固定本机仓库版本和持久
+source-mode租约；无缓存或其他机器回退。`training-storage-http.test.js` 用隔离
+SQLite及真实loopback HTTP核对独立读取lane、维护、鉴权、409/503安全数字投影和
+拒绝时零任务／零准备／零GPU派发；这是离线契约，不冒充生产节点或八卡训练验收。
+旧目录HTTP夹具的维护请求须使用真实 `scope:"all",revision:0` 并检查200，不能因
+忽略错误的 `scope:"global"` 请求而虚称验证了维护期间读取。
+
 `dataset-files.test.js`、`dataset-files-http.test.js`、`dataset-files.test.py` 和
 `dataset-files-bridge.test.py` 验证固定版本目录页：member 内容 ACL 与管理员元数据可见性
 分离、零额度／仓库源授权、旧节点明确 unavailable、200 项／64 KiB 上限、原源分页、
@@ -114,6 +125,8 @@ READY 与 SSD READY 分离，固定 `storageReference` 仅在服务端解析进�
 软链接路径被 no-follow 拒绝；原结果保留，以规定运行时和 `/private/tmp` 重跑全量，
 得到 1671 pass、2 个既有 skip、0 fail；没有修改节点代码、文件保护或断言来适配错误环境。
 
+`dataset-lock-wait.test.py` 验证真实全缓存／版本锁竞争分别给出单次或累计等待边界，不泄漏私人锁路径；`data-workspace.test.py` 验证登记前失败不虚构版本、复制途中失败保留原版本与真实片段、重复 FAILED key 不重派、显式新发布 key 沿同一内容版本核验并完成、历史失败不被改写，以及跨账号和普通扫描错误不伪装为锁竞争。阶段诊断不扩大旧发布接口的存储策略或部署范围。
+
 `dataset-deletion-continue-running.test.js` 使用独立 SQLite、真实挂起的 locations 回包及 loopback HTTP 登录，验证继续前持久 RUNNING/清旧 error、同编号查询不重放、重复继续零派发、持久化失败零启动和 worker 等待后的认证重核。真实 logout 在回包等待期间仍阻止全部写入；保持登录直到 DELETED 后再退出不改变原结果。假桥不连接节点，也不放宽认证或删除证明。
 
 `dataset-empty-registration-api.test.js` 与 `dataset-empty-registration.test.py` 专测管理员正常注销个人 0 版本登记：完整清单与节点强证明、原 worker/回执、默认 tier 与上传历史保留、丢回执沿原编号查询，以及新版本/owner/依赖变化、软硬链接、未知上传预留、成员/旧能力/单版本/伪造字段的零派发。Python 夹具使用真实缓存和后台 worker，只替换 systemd 启动与活动探测，不连接节点或调用 GPU；既有 unregister、last-copy 与 delete-retry 仍需回归，不能把空登记分支用作任意版本的最后副本例外。
@@ -133,6 +146,26 @@ READY 与 SSD READY 分离，固定 `storageReference` 仅在服务端解析进�
 同机项目导入回归包含固定 owner/project/UUID、当前授权和维护门禁、后台源/草稿双围栏、full SHA 与源 CAS、新目录不覆盖、秘密/软硬链接拒绝、终端/旧上传阻塞、未知启动/提交不解围栏、取消只清理私人 staging。`tests/project-local-import.test.py` 的 Mac 离线复制夹具仅测试流程；Linux 专用用例实际调用 renameat2，不能把 Mac fixture fallback 当生产原子能力证明。待上传 list/cancel 另测目标变化、COMMITTING/未知旧记录拒绝、取消回执后清理中断可恢复及跨账号隔离。`project-legacy-upload-cancel.test.py` 仅对明确未完成的四字段旧片段验证永久取消 fence 先于 no-replace quarantine、保留原字节、丢 ACK 和第二移动失败恢复、symlink/hardlink/重复 UUID/目的碰撞拒绝；Linux 额外实际调用 renameat2 并用独立进程争用原 store lock，Mac 仅用显式流程替代。Portal/CLI 不重放新建/取消，不读取本机源即可发现和取消旧操作。
 
 `tests/project-import-bridge.test.py` 隔离加载完整的实际执行桥，通过真实 Handler 和固定 SSH 命令构造验证上述五个新操作、旧上传/发布兼容、未知机器/邻近操作零派发、原 owner 与操作编号不变、节点拒绝原样返回及超时不重放。仅替换 inventory 和最终 SSH transport，不连接生产或读取凭据。
+
+## 固定仓库池回归
+
+`dataset-warehouse-pool.test.js` 使用隔离 SQLite 和合成节点容量，验证完整清单开销与 inode、
+非阻断低容量告警、真实不足/未知/身份错配零准入、当前权限、丢回执和重启不换仓、
+移除仓库后的 ISSUED/BOUND 区别、READY outbox 原 intent 对应、固定来源认证，以及
+旧 policy/journal 不被池配置重新解释。它不代表实际磁盘、跨机网络或正式直传已启用。
+`dataset-replication.test.js` 另验证首次准备根据已认证实际副本解析原仓库，旧 UUID 不
+重选源；原件证明缺失或冲突不猜测其他仓库，也不增加复制协议。
+`transfers-dual-root.test.py` 在临时独立目录使用真实证书 pin 的本机 TLS 复制，覆盖手动
+和训练准备落入缓存、旧 journal 续传仍入原根、根 inode／挂载变化拒绝、缺根不重建
+或改写 journal、非 authority 来源和客户端自报目标根在新派发前拒绝。它不操作真实
+节点、服务或 GPU，不代表生产盘速与跨机网络验收。
+
+训练项目准备与仓库池组合发布时，还须一起运行
+`training-project-preparation.test.js`、`training-project-preparation-node.test.py`、
+`training-preparation-worker.test.py` 与 `transfers-dual-root.test.py`：固定项目的私有
+准备／取消和原 UUID 不能退回普通复制，数据集的 `targetStorage` 摘要与根身份绑定
+同时保留。双根训练复制使用真实本机 TLS、显式模拟的校园物理路由，核对每次读取
+仍检查校园路线，旧 worker 不能消费新训练侧车或改写到仓库；不代表真实校园连通性。
 
 ## 项目生命周期额外回归
 
@@ -208,3 +241,5 @@ Linux 专用 test 实际 renameat2 no-replace。生产绝不用测试 fallback�
 ## 项目字节警告契约
 
 项目容量变更将原硬大小拒绝改为可成功的非阻断警告；对应断言保留并加强为成功状态、固定大小、阈值、`blocking:false`、完整版本／SHA 和协议精确整数上界。使用很小的可配置警告阈值验证发布、本地导入、同步及真实不足空间拒绝，不生成 50 GiB 载荷。上传节点用大 `totalSize` 和一个小片段核对原 UUID／偏移与警告、非法数值零写入；CLI 用临时稀疏 4 GiB+1 文件完整散列并恢复匹配 COMPLETE 回执，验证警告不阻断、已完成不重传。portable／OCI 用可信身份的合成大载荷清单验证旧 50/100 GiB 边界允许且数字溢出、错 owner／路径／镜像／清单依然拒绝。测试不表示实际大镜像转移性能已验收。
+
+`dataset-lock-wait.test.py` 验证真实全缓存／版本锁竞争分别给出单次或累计等待边界，不泄漏私人锁路径；`data-workspace.test.py` 验证登记前失败不虚构版本、复制途中失败保留原版本与真实片段、重复 FAILED key 不重派、显式新发布 key 沿同一内容版本核验并完成、历史失败不被改写，以及跨账号和普通扫描错误不伪装为锁竞争。阶段诊断不扩大旧发布接口的存储策略或部署范围。
