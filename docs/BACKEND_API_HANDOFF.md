@@ -137,6 +137,8 @@ ProjectOps 只认可绑定完整原收据摘要及快照 inode 的证明；单�
 
 只读内部 `datasets.training.status` 与 `storage.training.plan` 仅走正常训练执行桥，不扩展元数据或上传 forced key。客户端不提交 `projectFootprint`、`datasetFootprints`、物理路径、authority、容量计划或 hostAdmin；前端仍仅提交原固定项目和数据声明。
 
+缺失缓存的准备也必须配套新的私有 `storage.training.prepare` 执行路径：Portal 在原作业／传输记录中先保存完整 spec、容量请求和原准备编号，节点按同一固定账号、版本、源／目标及不可变运行时执行。旧记录不自动升级；丢回执只查原操作，取消仍须证明原 worker 停止，UNKNOWN 保留原保护。分离运行时和执行桥的完整配套未确认前不能开放新训练准备，不能回退旧 worker、自动回收缓存或生成第二条传输。该内部上下文不接受客户端选择，也不投影到公开作业／传输响应。
+
 前端预检使用认证只读 `datasets.training.capabilities {machine,dataset,version}`，只能传这三个固定字段。返回 `{protocol:1,machine,dataset,version,warehouse:{available,reason}}`；`reason` 为 `null`、`maintenance`、`offline`、`protocol-unavailable`、`unverified`、`forbidden`、`machine-not-warehouse` 或 `not-ready`。这不是容量预留或训练授权，提交时仍重核全部条件；维护或旧／未知节点不开放仓库直读。查询走有界独立数据读取 lane，不等待全局写队列，前后重新验证登录与授权，不泄露物理源。
 
 已确认容量不足的提交返回 HTTP409、`code:"SUBMISSION_REJECTED"`；容量／协议无法确认返回503、同一 code。可附 `storage:{protocol:1,reasonCode:"TRAINING_STORAGE_INSUFFICIENT"|"TRAINING_STORAGE_UNKNOWN",requiredBytes,availableBytes,volumes}`。顶层数字仅在唯一确认的物理字节不足时为非负整数，否则为 null；UNKNOWN 为全 null 和空 volumes。已确认行仅含 `roles:["project"|"cache"]`、`requiredBytes/availableBytes/requiredInodes/availableInodes`；available 已扣预留和在途承诺。文件数、预算或多项限制不足时显示错误原文，不拿磁盘物理 free 伪造统一可用数字。不会返回内部计划、owner、路径或设备身份。
