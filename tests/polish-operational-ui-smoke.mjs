@@ -342,6 +342,7 @@ try{
             result={offset:12,data:terminalCalls===1?Buffer.from('Local xterm.\r\n').toString('base64'):'',exited:scene.state==='ended',exitCode:scene.state==='ended'?17:null};
           }else if(operation==='terminal.detach')result={detached:true};
           else if(operation==='jobs.logs')result={text:'Local training log.'};
+          else if(operation==='jobs.completion'){assert.deepEqual(Object.keys(args),['jobId']);assert.ok(state.jobs.some(row=>row.id===args.jobId&&row.userId===principal.userId),'Completion reads stay bound to the fixture owner and exact job');result={protocol:0};}
           else if(operation==='community.info')result={enabled:true,capabilities:['task-notes-v1']};
           else if(operation==='community.notes.list')result={notes:[],nextCursor:null};
           else if(operation==='files.list')result={entries:[]};
