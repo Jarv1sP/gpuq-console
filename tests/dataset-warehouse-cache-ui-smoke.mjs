@@ -65,6 +65,19 @@ try{for(const role of ['member','admin'])for(const width of [1440,390,320]){
  for(const machine of machines.slice(2)){const legacy=page.locator('[data-v3-cache="'+machine.id+'"]');assert.equal(await legacy.count(),1);assert.equal(await legacy.isEnabled(),true);assert.equal(await legacy.textContent(),'缓存');}
  assert.equal(await page.locator('[data-v3-cache="'+target+'"]').count(),0,'A protocol1 prepare row uses the new action exclusively');
  assert((await page.evaluate(()=>calls)).every(row=>row.operation==='datasets.cache.capabilities'));
+ const editRefresh=await page.evaluate(async()=>{
+  const edit=document.querySelector('[data-v3-label]'),size=node=>({connected:node.isConnected,width:node.getBoundingClientRect().width,height:node.getBoundingClientRect().height});
+  edit.focus();const before=size(edit),insertions=[];
+  const observer=new MutationObserver(()=>{const current=document.querySelector('[data-v3-label]');insertions.push({...size(current),same:current===edit});});observer.observe(document.querySelector('#warehouse-inspector'),{childList:true,subtree:true});
+  const refreshes=[];for(let n=0;n<3;n++){snapshot.datasets[0].versions[0].fileCount++;view.storageOverview(snapshot);refreshes.push({...size(edit),same:edit===document.querySelector('[data-v3-label]'),focused:document.activeElement===edit});}
+  const source=snapshot.caches[0].machine;permitted.delete(source);view.storageOverview(snapshot);const disabled=edit.disabled;permitted.add(source);view.storageOverview(snapshot);const enabled=!edit.disabled;
+  await Promise.resolve();observer.disconnect();const nextAccount=store.authGeneration;store.authGeneration++;view.storageOverview(snapshot);const accountReplaced=edit!==document.querySelector('[data-v3-label]');store.authGeneration=nextAccount;view.storageOverview(snapshot);
+  return {before,refreshes,insertions,disabled,enabled,accountReplaced};
+ });
+ assert(editRefresh.before.connected&&editRefresh.before.width>=44&&editRefresh.before.height>=44,'edit control starts with a 44px target');
+ assert(editRefresh.refreshes.every(row=>row.connected&&row.same&&row.focused&&row.width>=44&&row.height>=44),'refresh keeps the current edit button and keyboard focus: '+JSON.stringify(editRefresh));
+ assert(editRefresh.insertions.length>0&&editRefresh.insertions.every(row=>row.connected&&row.same&&row.width>=44&&row.height>=44),'edit control has dimensions from insertion; no zero-height replacement');
+ assert(editRefresh.disabled&&editRefresh.enabled&&editRefresh.accountReplaced,'live permission changes apply and another account cannot inherit the edit control');
  const targets=await page.locator('#warehouse-inspector button:visible').evaluateAll(nodes=>nodes.map(node=>({name:node.textContent.trim(),width:node.getBoundingClientRect().width,height:node.getBoundingClientRect().height})));
  assert(targets.some(row=>row.name==='转移到…')&&targets.some(row=>row.name==='释放缓存')&&targets.some(row=>row.name==='缓存')&&targets.some(row=>row.name==='复制'),'new and legacy detail operations remain visible');
  assert(targets.every(node=>node.width>=44&&node.height>=44),'cache, transfer, release and copy retain default/mobile 44px targets: '+JSON.stringify({width,targets}));
