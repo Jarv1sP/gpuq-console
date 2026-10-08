@@ -43,7 +43,8 @@ ANONYMOUS_REGISTRIES_RAW = (b'credential-helpers = ["containers-auth.json"]\n'
 
 def module(name):
     paths = {'storage-quota':'storage-quota.py','project-store':'project-store.py',
-             'training-control':'training-control.py','job-resources':'job-resources.py'}
+             'training-control':'training-control.py','job-resources':'job-resources.py',
+             'oci-cohort':'oci-cohort.py'}
     spec = importlib.util.spec_from_file_location('gpuq_oci_'+name.replace('-', '_'), HERE/paths[name])
     value = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(value)
@@ -84,6 +85,9 @@ def policy(config, user=None):
     need('autoOwners' not in value or type(value['autoOwners']) is bool, 'Invalid automatic OCI cohort')
     need(not value.get('autoOwners') or 'owners' in value, 'Automatic OCI requires an explicit scoped cohort')
     need('autoOwnersRevision' not in value or ('owners' in value and 'autoOwners' in value and type(value['autoOwnersRevision']) is int and 0<=value['autoOwnersRevision']<=9007199254740991), 'Invalid automatic OCI cohort revision')
+    if 'personalOciCohort' in config:
+        need(config['personalOciCohort'] is not None, 'Invalid live OCI cohort binding')
+        value = module('oci-cohort').current_policy(config, value)
     quota_enabled = module('storage-quota').enabled(config, user)
     if 'owners' in value:
         owners = value['owners']
@@ -972,6 +976,11 @@ class PersonalOCI:
                 for fd in reversed(held): os.close(fd)
 
     def execute(self, spec, project, terminal, uuids, mounts, *, control=(), pass_fds=()):
+        # A queued job may start long after its initial preparation. Recheck
+        # current membership before any new container execution, without
+        # replacing immutable capabilities, storage roots or cleanup runtime.
+        if 'personalOciCohort' in self.config:
+            policy(self.config, self.user)
         with self.registry_auth() as (env, authfd), self.named_mounts(mounts, control):
             return self._execute(spec, project, terminal, uuids, mounts,
                                  control=control, pass_fds=pass_fds, registry_env=env)
@@ -1010,6 +1019,8 @@ class PersonalOCI:
                 # retains this identity; never mint a replacement implicitly.
                 head['container'] = name
                 self.s.atomic_json(self.state_path(spec['project']), head)
+                if 'personalOciCohort' in self.config:
+                    policy(self.config, self.user)
                 result = subprocess.run(self.command('create', '--name', name, *flags,
                     '--entrypoint', spec['argv'][0], head['image'], *spec['argv'][1:]),
                     env=registry_env, text=True, capture_output=True, pass_fds=pass_fds, timeout=60)
@@ -1017,6 +1028,8 @@ class PersonalOCI:
             return subprocess.call(self.command('start', '--attach', '--interactive', name), env=registry_env, pass_fds=pass_fds)
         image = self.verify_image(spec['project'], project['meta']['oci'])
         name = 'gpuq-job-'+uuid.uuid4().hex
+        if 'personalOciCohort' in self.config:
+            policy(self.config, self.user)
         return self.call(self.command('run', '--rm', '--name', name, *flags,
                                '--entrypoint', spec['argv'][0], image, *spec['argv'][1:]),
                                env=registry_env, pass_fds=pass_fds)
