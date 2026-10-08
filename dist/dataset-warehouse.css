@@ -59,15 +59,14 @@ body[data-room=datasets] .v3-partial{font:12px var(--sans);align-self:center}
 #page-datasets .v3-strata.out i{background:none;border-top:2px dashed var(--ink-3);height:0}
 #page-datasets .v3-strata.out i:nth-child(n+2){display:none}#page-datasets .v3-strata.failed i{background:var(--v3-bad)}
 #page-datasets .v3-inspector{min-width:0;position:sticky;top:24px;display:flex;flex-direction:column;gap:0;overflow:hidden;border:1px solid var(--line);border-radius:10px;background:var(--bg-1);align-self:start}
+#page-datasets .v3-inspector-page-scroll{position:relative;top:auto}
 #page-datasets .v3-inspector:empty{display:none}
 #page-datasets .v3-inspector{scroll-margin-top:24px;scroll-margin-bottom:calc(var(--bottom-reserve,92px) + 12px)}
-#page-datasets .v3-detail-scroll{flex:0 1 auto;min-height:0;overflow:auto;overscroll-behavior:contain;margin:0}
-#page-datasets .v3-inspector-overflow .v3-detail-scroll{flex:1;overflow:auto}
+#page-datasets .v3-detail-scroll{flex:none;min-height:0;overflow:visible;margin:0}
 #page-datasets .v3-detail-scroll>section{padding:12px 20px;margin:0;border-bottom:1px solid var(--line)}
 #page-datasets .v3-detail-scroll>section:last-child{border:0}
 #page-datasets .v3-train{flex:none;background:var(--bg-1);padding:12px 20px;margin:0;border-top:1px solid var(--line);display:block}
 #page-datasets .v3-train .v3-lab{margin-bottom:8px}
-#page-datasets .v3-inspector-overflow .v3-train{position:sticky;bottom:0}
 #page-datasets .v3-inspector h2{margin:0;font:600 22px/1.25 var(--display);display:flex;align-items:center;gap:8px}
 #page-datasets .v3-inspector h2>span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #page-datasets .v3-edit{min-height:32px;min-width:32px;border:0;background:none;color:var(--ink-3);cursor:pointer;font-size:18px}
@@ -80,7 +79,7 @@ body[data-room=datasets] .v3-partial{font:12px var(--sans);align-self:center}
 #page-datasets .v3-version{height:48px!important;min-height:48px!important;max-width:180px;font:12px var(--mono);padding:0 8px!important}
 #page-datasets .v3-store{display:flex;align-items:center;gap:10px;font-size:13px;min-width:0}
 #page-datasets .v3-store code{margin-left:auto;color:var(--ink-3);font:11px var(--mono);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:none;padding:0}
-.sb #page-datasets .v3-server.dataset-card{display:grid;grid-template-columns:12px minmax(0,1fr) auto;align-items:center;gap:10px;min-height:44px;margin:0;padding:4px 0;background:none;border:0;border-bottom:1px dashed var(--line);border-radius:0}
+.sb #page-datasets .v3-server.dataset-card{display:grid;grid-template-columns:12px minmax(0,1fr) auto;align-items:center;gap:10px;min-height:48px;margin:0;padding:0;background:none;border:0;border-bottom:1px dashed var(--line);border-radius:0}
 .sb #page-datasets .v3-server .dataset-remove-more{margin-top:0}
 #page-datasets .v3-server-text{display:flex;align-items:baseline;gap:8px;min-width:0;flex-wrap:wrap}
 #page-datasets .v3-server-text b{font:500 13px var(--mono);max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -179,7 +178,7 @@ body[data-room=datasets] .v3-partial{font:12px var(--sans);align-self:center}
  #page-datasets .v3-train{padding:16px 0;background:var(--bg)}
  #page-datasets :is(.v3-edit,.v3-copy){min-height:48px;min-width:48px}
  #page-datasets .v3-version{height:48px!important;min-height:48px!important;font-size:16px}
- #page-datasets .v3-back{display:inline-flex;margin-left:-10px}
+ #page-datasets .v3-back{display:inline-flex;margin-left:0}
  #page-datasets .v3-upload{width:100%;height:100dvh;max-height:100dvh;padding-inline:16px}
  #page-datasets .v3-upload .dataset-sheet-head{margin-inline:-16px;padding-inline:16px}
  #page-datasets .v3-other-sources{gap:8px}

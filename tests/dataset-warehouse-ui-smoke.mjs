@@ -115,6 +115,12 @@ try{
     assert.equal(visibility.rows.length,4);
     assert(visibility.rows.every(row=>row.complete),'all four server rows are complete at '+JSON.stringify({role,size,visibility}));
     assert.equal(visibility.scroll,0,'four server rows do not need an internal scrollbar at '+JSON.stringify({role,size,visibility}));
+    const targets=await page.locator('#warehouse-inspector button:visible').evaluateAll(nodes=>nodes.map(node=>({name:node.textContent.trim(),height:node.getBoundingClientRect().height,width:node.getBoundingClientRect().width})));
+    assert(targets.length>0&&targets.every(row=>row.height>=48&&row.width>=48),'page scrolling retains every 48px detail target: '+JSON.stringify({role,size,targets}));
+    assert.equal(await page.locator('#warehouse-inspector').evaluate(node=>getComputedStyle(node).maxHeight),'none','natural detail height is not constrained to the viewport');
+    assert(await page.locator('.v3-server').evaluateAll(nodes=>nodes.every(node=>parseFloat(getComputedStyle(node).paddingTop)===0&&parseFloat(getComputedStyle(node).paddingBottom)===0)),'cache rows do not add vertical padding around the 48px controls');
+    await page.evaluate(()=>{document.activeElement?.blur();scrollTo(0,0);});
+    await page.screenshot({path:join(output,role+'-detail-'+size.width+'x'+size.height+'.png'),fullPage:true,animations:'disabled'});
    }
    await page.setViewportSize({width,height:1000});await page.evaluate(()=>scrollTo(0,0));
   }else{
@@ -128,6 +134,17 @@ try{
    if(width===390){const cards=await page.locator('.v4-training-card').evaluateAll(nodes=>nodes.map(node=>node.getBoundingClientRect().toJSON()));assert.equal(cards.length,machines.length);assert(cards.every(r=>r.x>=0&&r.x+r.width<=width+1&&r.height>=80),'every phone training card is fully inside the page');assert.equal(new Set(cards.map(r=>r.y)).size,machines.length,'phone cards stack instead of clipping a horizontal chip');}
    assert.equal(await page.locator('.help-links').isVisible(),false);
    await page.addStyleTag({content:'.sb #page-datasets #warehouse-search{height:48px!important;min-height:48px!important}'}).then(async style=>{const result=await inspectGeometry(page,{...datasetHelpGeometry,roots:['#page-datasets']});assert(result.failures.some(row=>row.rule==='compact-search'),'the old 48px phone search fails the exact new contract');await style.evaluate(node=>node.remove());});
+  }
+  if(width<760){
+   await page.locator('[data-v3-select=imagenet-sub]').click();
+   await page.locator('#warehouse-inspector .v3-train').waitFor();
+   const targets=await page.locator('#warehouse-inspector button:visible').evaluateAll(nodes=>nodes.map(node=>({name:node.textContent.trim(),height:node.getBoundingClientRect().height,width:node.getBoundingClientRect().width})));
+   assert(targets.length>0&&targets.every(row=>row.height>=48&&row.width>=48),'phone detail retains all 48px controls: '+JSON.stringify({role,width,targets}));
+   assert.equal(await page.locator('.v3-server').count(),4);
+   assert.equal(await page.locator('.v3-detail-scroll').evaluate(node=>node.scrollHeight-node.clientHeight),0,'phone cache rows scroll with the page');
+   await page.evaluate(()=>{document.activeElement?.blur();scrollTo(0,0);});
+   await page.screenshot({path:join(output,role+'-detail-'+width+'x1000.png'),fullPage:true,animations:'disabled'});
+   await page.locator('[data-v3-back]').click();
   }
   await page.locator('[data-v3-upload]').first().click();await page.locator('#dataset-add-dialog[open]').waitFor();await shot('upload-1');
   assert.equal(await page.locator('.v3-drop h3').textContent(),width<760?'选择文件':'拖入文件夹或文件');
