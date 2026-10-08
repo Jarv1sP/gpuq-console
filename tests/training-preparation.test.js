@@ -109,3 +109,15 @@ test('marked local preparation is wired through observation and cannot promote P
   await advanceDataPreparation(f.service,f.job,usage);
   assert.equal(f.job.state,'SUBMITTING');assert.equal(f.calls.filter(c=>c.operation==='storage.training.prepare').length,1);
 });
+test('lost or null transfer context cannot downgrade a durable marked intent to legacy',async t=>{
+  for(const marker of ['missing','null']){
+    const f=fixture(t);
+    const value=await f.service.trainingTransferCall(f.principal,f.copy,{jobId:f.job.id,logicalReference:ref});
+    const row=f.service.db.prepare('SELECT data FROM transfers WHERE id=?').get(value.id),data=JSON.parse(row.data);
+    if(marker==='missing')delete data.trainingPreparation;else data.trainingPreparation=null;
+    f.service.db.prepare('UPDATE transfers SET data=? WHERE id=?').run(JSON.stringify(data),value.id);
+    f.calls.length=0;
+    assert.equal((await f.service.transferCall(f.principal,'transfers.status',{id:value.id})).state,'UNKNOWN');
+    assert.equal(f.calls.length,0,'missing context must never send a legacy target request');
+  }
+});
