@@ -1,4 +1,5 @@
 import {createJobDiagnostics} from './job-diagnostics-ui.js';
+import {formatTimestamp} from './time-format.js';
 import {createJobResultAccess,resultFilesHTML,resultPullCommand} from './job-results-ui.js';
 import {jobProgressHTML,jobNotificationHTML} from './job-progress-ui.js';
 import {yieldCapable} from './scheduling-policy.js';
@@ -33,8 +34,7 @@ export function priorityRankValue(value){if(!['idle','P1','normal','P3','high','
 export function priorityRankLabel(job){return job.priority!=null&&Number.isInteger(job.schedulerPriority)&&job.schedulerPriority>=0&&job.schedulerPriority<=4?rankLabels[job.schedulerPriority]:priorityLabel(job.priority);}
 export function schedulingContractLabel(policy){if(!policy)return '让位/恢复策略未确认';return `${({never:'不让位',now:'允许立即让位',save:'保存后让位',legacy:'旧版让位策略'})[policy.yield_policy]||'让位方式未知'} · ${policy.restart_policy==='on-preempt'?'被抢占后重新排队':policy.restart_policy==='never'?'被抢占后不重排':'重启方式未知'}`;}
 export function sampleTime(value){
-  const date=typeof value==='number'?new Date(value*1000):new Date(value);
-  return value!==null&&value!==undefined&&value!==''&&Number.isFinite(date.getTime())?date.toLocaleString('zh-CN',{hour12:false}):'未提供';
+  return formatTimestamp(value);
 }
 export function taskStateLabel(job){
   if(job.state==='CANCELED'&&job.preempted===true)return '让位结束';

@@ -4,7 +4,7 @@ import {readFile,mkdir} from 'node:fs/promises';
 import {chromium} from 'playwright';
 const root=new URL('../',import.meta.url),artifact=new URL('../.deployment-private/',import.meta.url);
 await mkdir(artifact,{recursive:true});
-const source=await readFile(new URL('dist/job-diagnostics-ui.js',root),'utf8');
+const source=await readFile(new URL('dist/time-format.js',root),'utf8')+'\n'+(await readFile(new URL('dist/job-diagnostics-ui.js',root),'utf8')).replace("import {formatTimestamp} from './time-format.js';",'');
 const styles=await readFile(new URL('dist/styles.css',root),'utf8')+'\n'+await readFile(new URL('dist/job-diagnostics.css',root),'utf8');
 const browser=await chromium.launch({headless:true,...(process.env.CHROME_PATH?{executablePath:process.env.CHROME_PATH}:{})});
 try{
@@ -12,8 +12,11 @@ try{
   await page.route('**/*',route=>route.abort());
   await page.setContent('<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><link id="job-diagnostic-styles"></head><body><dialog class="job-log-dialog"><div class="modal-head"><h2>训练日志 · 最近 200 行</h2><button class="button" id="close-job-log">关闭</button></div><pre></pre></dialog></body></html>');
   await page.addStyleTag({content:styles});
-  await page.addScriptTag({type:'module',content:source+'\nwindow.makeDiagnostics=createJobDiagnostics;'});
+  await page.addScriptTag({type:'module',content:source+'\nwindow.makeDiagnostics=createJobDiagnostics; window.observationMarkup=nativeObservationHTML;'});
   await page.waitForFunction(()=>window.makeDiagnostics);
+  assert.equal(await page.evaluate(()=>{
+    const root=document.createElement('div');root.innerHTML=window.observationMarkup({protocol:'native-observation-v1',readOnly:true,status:'CONFIRMED',state:'SUCCEEDED',observedAt:0});return root.querySelector('dd').textContent;
+  }),'—','zero observation time cannot be displayed as an epoch date');
   await page.evaluate(()=>{
     const jobId='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';window.jobId=jobId;
     window.store={principal:{userId:'owner',role:'member'},call:async operation=>operation==='jobs.logs'?{text:'Ray started\n\n[GPUQ 持久诊断]\nRuntimeError: CUDA out of memory\nOOM kill=1 / PID 拒绝=2'}:{jobId,state:'PARTIAL',schedulerState:'RUNNING',workerErrorEvidence:true,attempts:[{id:'A1',state:'FAILED',gpu_indices:[0,1],gpu_uuids:['GPU-00000000-0000-0000-0000-000000000000','GPU-11111111-1111-1111-1111-111111111111'],started_at:1790700000,finished_at:1790700060}],captures:[{updatedAt:1790700060,runnerExit:{exitCode:137},resources:{peaks:{'memory.peak':1024**3,'pids.peak':80},counters:{'memory.events':{oom:1,oom_kill:1},'pids.events':{max:2}}},logs:[{source:'worker-test.err',text:'<img src=x onerror="window.pwn=true">\nRuntimeError: CUDA out of memory',truncated:false}]}]}};

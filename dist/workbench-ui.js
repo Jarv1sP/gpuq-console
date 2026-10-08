@@ -1,4 +1,5 @@
 import {progressPercent,progressText,jobTiming} from './job-progress.js';
+import {formatTimestamp} from './time-format.js';
 import {maintenanceActive} from './maintenance-state.js';
 import {captureObject,sharedObject,reducedMotion} from './motion-ui.js';
 
@@ -164,15 +165,13 @@ export function trainingReadout(job){
   return {fresh,percent:fresh?percent:null,eta,epoch:fresh&&s.epochsTotal?`第 ${s.epochsCompleted} / ${s.epochsTotal} 轮`:'',metrics,description,phase:fresh?s.phase||'':'',updatedAt:fresh?s.updatedAt:null,completionPending:fresh&&percent>=100&&!endedJob(job)};
 }
 function shortTime(value){
-  if(value===undefined||value===null||value==='')return '';
-  const date=new Date(typeof value==='number'?value*1000:value);
-  return Number.isFinite(date.getTime())?date.toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',hour12:false}):'';
+  return formatTimestamp(value,{clock:true,format:{hour:'2-digit',minute:'2-digit',hour12:false}});
 }
 export function trajectoryHTML(job){
   const stages=[['提交','submit'],...(job.datasets?.length||job.state==='PREPARING_DATA'?[['准备数据','prepare']]:[]),['排队','queue'],['启动','start'],['运行','run'],['结束','end']];
   const key=endedJob(job)?'end':({PREPARING_DATA:'prepare',PENDING:'queue',QUEUED:'queue',STARTING:'start',RUNNING:'run',SUBMITTING:'submit'})[job.state];
   const current=stages.findIndex(([,value])=>value===key),times={submit:job.createdAt,run:job.latestAttempt?.startedAt,end:job.latestAttempt?.finishedAt};
-  return `<ol class="tl wb-trajectory" aria-label="任务轨迹">${stages.map(([label,value],index)=>`<li class="${index===current?'now':current>=0&&index<current?'done':''}"><span class="d" aria-hidden="true"></span><span class="n">${label}</span>${shortTime(times[value])?`<time class="t">${escapeUI(shortTime(times[value]))}</time>`:''}</li>`).join('')}</ol>`;
+  return `<ol class="tl wb-trajectory" aria-label="任务轨迹">${stages.map(([label,value],index)=>`<li class="${index===current?'now':current>=0&&index<current?'done':''}"><span class="d" aria-hidden="true"></span><span class="n">${label}</span>${shortTime(times[value])!=='—'?`<time class="t">${escapeUI(shortTime(times[value]))}</time>`:'<span class="t">—</span>'}</li>`).join('')}</ol>`;
 }
 export function jobFacts(job){
   const indices=job.assignedIndices?.length?'GPU '+job.assignedIndices.join(' · '):Number.isSafeInteger(job.cards)?job.cards+' 张':'卡数未确认';
@@ -240,7 +239,7 @@ export function jobOverviewHTML(job,{owned=true,schedulingHTML=''}={}){
 
 export function jobTimingHTML(job){
   if(!endedJob(job))return '';
-  const timing=jobTiming(job),display=value=>value?`<time datetime="${escapeUI(value)}">${escapeUI(new Date(value).toLocaleString('zh-CN',{hour12:false}))}</time>`:'未确认';
+  const timing=jobTiming(job),display=value=>value?`<time datetime="${escapeUI(value)}">${escapeUI(formatTimestamp(value))}</time>`:'未确认';
   return `<dl class="job-overview-grid"><div><dt>节点运行结束</dt><dd>${display(timing.workerFinishedAt)}</dd></div><div><dt>门户确认终态</dt><dd>${display(timing.terminalObservedAt)}</dd></div></dl>`;
 }
 

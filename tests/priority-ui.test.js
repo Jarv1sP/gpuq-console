@@ -22,8 +22,8 @@ test('old and external priorities remain unknown or raw P-levels, never assumed 
   assert.equal(priorityLabel(null),'未标注');assert.equal(priorityLabel(undefined),'未标注');assert.equal(priorityLabel(0),'P0（原队列）');assert.equal(priorityLabel(4),'P4（原队列）');assert.equal(priorityLabel('P4'),'未标注');
   assert.match(taskTable([{...job,priority:null,schedulerPriority:4,canSetPriority:false}]),/未标注/);
   assert.match(taskTable([{...job,priority:null,schedulerPriority:4,canSetPriority:false}]),/节点优先级：P4/);
-  for(const value of [null,undefined,'','invalid'])assert.equal(sampleTime(value),'未提供');
-  assert.notEqual(sampleTime('2026-09-29T08:00:00Z'),'未提供');assert.notEqual(sampleTime(1790668800),'未提供');
+  for(const value of [null,undefined,'','invalid',0,-1,NaN])assert.equal(sampleTime(value),'—');
+  assert.notEqual(sampleTime('2026-09-29T08:00:00Z'),'—');assert.notEqual(sampleTime(1790668800),'—');
 });
 test('priority controls require administrator plus explicit queued capability, never running/unknown',()=>{
   assert.equal(canEditPriority(job),false);assert.equal(canEditPriority(job,true),true);
@@ -36,7 +36,7 @@ test('task table displays scheduler evidence without inventing sampling time or 
   const html=taskTable([job]);assert.match(html,/普通/);assert.match(html,/等待空闲 GPU/);assert.match(html,/状态：PENDING/);assert.match(html,/更新于/);
   assert.equal(taskStateLabel({...job,state:'CANCELED'}),'已取消');assert.equal(taskStateLabel({...job,state:'CANCELED',preempted:true}),'让位结束');
   const preempted=taskTable([{...job,state:'CANCELED',preempted:true}]);assert.match(preempted,/输出保留，不自动恢复/);assert.match(preempted,/data-job-cancel="job-1" disabled/);
-  const unknown=taskTable([{...job,schedulerCheckedAt:null,queueReason:null,schedulerState:null}]);assert.match(unknown,/更新于 未提供/);assert.match(unknown,/暂无调度说明/);assert.doesNotMatch(unknown,/预计.*开始/);
+  const unknown=taskTable([{...job,schedulerCheckedAt:null,queueReason:null,schedulerState:null}]);assert.match(unknown,/更新于 —/);assert.match(unknown,/暂无调度说明/);assert.doesNotMatch(unknown,/预计.*开始/);
 });
 test('data preparation state and escaped task metadata coexist after the frontend merge',()=>{
   const preparing={...job,state:'PREPARING_DATA',schedulerState:null,submitterName:'张三 <script>',description:'等待固定数据版本 <img src=x>',canSetPriority:false};

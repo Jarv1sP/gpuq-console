@@ -19,7 +19,7 @@ const temp=await mkdtemp(join(tmpdir(),'r5-work-browser-'));
 const shots=process.env.UI_SCREENSHOTS||'/tmp/r5-ui-smoke';
 const [targetMachine,sourceMachine]=MACHINES.map(machine=>machine.id);
 const password='Starbase-Local-Fixture-Only-2026!',release='a'.repeat(64);
-const errors=[],outside=[],assets=[],calls=[],sessions=new Map();
+const errors=[],outside=[],assets=[],calls=[],sessions=new Map(),trainingCapabilityReads=[];
 let server,service,browser,releaseCatalog,releaseInventory,datasetOwners=[];
 const reserve=net.createServer();await new Promise(resolve=>reserve.listen(0,'127.0.0.1',resolve));const port=reserve.address().port;await new Promise(resolve=>reserve.close(resolve));
 const origin='http://127.0.0.1:'+port;
@@ -90,7 +90,15 @@ try{
     const context=await browser.newContext({viewport:{width,height:width<760?844:1080},reducedMotion:reduced?'reduce':'no-preference'});const page=await context.newPage();await freezeR5Clock(page,fixtureTime);
     page.on('pageerror',error=>errors.push(error.message));page.on('console',message=>{if(message.type()==='error'&&!message.text().includes('401'))errors.push(message.text());});
     page.on('response',response=>{if(response.url().startsWith(origin)&&!new URL(response.url()).pathname.startsWith('/api/'))assets.push({path:new URL(response.url()).pathname,status:response.status()});});
-    await context.route('**/*',guardedRoute(async route=>{const url=new URL(route.request().url());if(url.origin===origin||['data:','blob:'].includes(url.protocol)){await route.continue();return;}outside.push(url.href);await route.abort();}));
+    await context.route('**/*',guardedRoute(async route=>{const request=route.request(),url=new URL(request.url());
+      // #223 preconnects this future endpoint; the legacy R5 fixture stays unavailable.
+      if(url.origin===origin&&url.pathname==='/api/call'){
+        const body=request.postDataJSON();if(body.operation==='datasets.training.capabilities'){
+          assert.deepEqual(Object.keys(body.args).sort(),['dataset','machine','version']);assert.ok(MACHINES.some(machine=>machine.id===body.args.machine));assert.equal(body.args.version,release);trainingCapabilityReads.push(body.args);
+          return route.fulfill({json:{result:{...body.args,protocol:0,warehouse:{available:false,reason:'旧协议'}}}});
+        }
+      }
+      if(url.origin===origin||['data:','blob:'].includes(url.protocol)){await route.continue();return;}outside.push(url.href);await route.abort();}));
     return page;
   }
   async function login(page,username){await page.goto(origin);await page.locator('#login-form [name=username]').fill(username);await page.locator('#login-form [name=password]').fill(password);await page.locator('#login-form [type=submit]').click();await page.locator('#login-dialog').waitFor({state:'hidden'});await page.evaluate(()=>document.fonts.ready);}
@@ -271,6 +279,7 @@ try{
   await phone.route('**/api/call',observePrepare);await datasetDetail(phone,'scans');await Promise.all([phone.waitForResponse(response=>response.url()===origin+'/api/call'&&response.request().postDataJSON()?.operation==='datasets.prepare'),phone.locator('[data-v3-cache="'+targetMachine+'"][data-dataset="scans"]').click()]);await phone.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);assert.equal(prepared.length,2);assert.deepEqual(prepared[1],{machine:targetMachine,dataset:'scans',version:release});await phone.unroute('**/api/call',observePrepare);
   await desktop.locator('[data-nav=work]').click();await desktop.locator('.wb-focal [data-job-mission]').click();desktop.once('dialog',async dialog=>{assert.match(dialog.message(),/释放 2 张卡的额度/);await dialog.accept();});await desktop.locator('#job-mission [data-job-cancel]').click();await desktop.waitForFunction(()=>document.querySelector('#job-mission .st')?.textContent.includes('正在取消'));assert.equal(requests.filter(row=>row.operation==='jobs.cancel').length,1);assert.equal(await desktop.locator('#job-mission [data-job-cancel]').isDisabled(),true);
   await desktop.evaluate(()=>document.querySelector('#switch-account').click());await desktop.locator('#login-dialog').waitFor({state:'visible'});await desktop.locator('#job-mission').waitFor({state:'hidden'});assert.equal(await desktop.locator('#job-mission').innerText(),'');assert.equal(await desktop.locator('#submission-receipt').count(),0);
+  assert.ok(trainingCapabilityReads.length>0,'legacy capability fixture is exercised');assert.ok(submitRequests.every(args=>!Object.hasOwn(args,'datasetReadMode')),'protocol0 never adds warehouse mode');
   assert.deepEqual(outside,[]);assert.deepEqual(errors.filter(message=>!message.includes('ERR_FAILED')&&!message.includes('Failed to fetch')),[]);assert.ok(assets.filter(row=>row.path.endsWith('.woff2')).every(row=>row.status===200));
   console.log(JSON.stringify({status:'passed',checks:['empty pre-login inventory + delayed member directory + admin state + logout mirrors/capacity','mission real attempt/allocated GPU/timeline/Escape/privacy','stage adaptive hero + one real state-boundary sweep','explicit Chinese parse/version/confirmation/target binding','lost submit reply + identical explicit idempotent retry + in-place receipt','operation column and read-only true-source route','1440/390/320 member/admin + all inventory names + reduced motion + CSP/self-hosted fonts'],screenshots:shots}));
 }finally{
