@@ -127,6 +127,8 @@ READY 与 SSD READY 分离，固定 `storageReference` 仅在服务端解析进�
 
 `dataset-lock-wait.test.py` 验证真实全缓存／版本锁竞争分别给出单次或累计等待边界，不泄漏私人锁路径；`data-workspace.test.py` 验证登记前失败不虚构版本、复制途中失败保留原版本与真实片段、重复 FAILED key 不重派、显式新发布 key 沿同一内容版本核验并完成、历史失败不被改写，以及跨账号和普通扫描错误不伪装为锁竞争。阶段诊断不扩大旧发布接口的存储策略或部署范围。
 
+`transfers-http-ui-smoke.mjs` 的现代网页上传通过真实 Portal/SQLite 准入取得服务端 UUID，再由 Chromium 请求固定校园 HTTPS 夹具的能力探测、短期票据和原始字节通道；夹具直接调用本地节点桥，不把字节伪装成门户 RPC。测试要求公开 manifest/chunk 字节 RPC 为零，保留清单与文件 SHA、固定仓库、账号隔离及 1440/390/320 布局检查，并拒绝未知票据或错 UUID。前半段独立 CLI legacy transfer 覆盖保持，三组既有导入的浏览器回归也继续执行；这些隔离夹具不代表真实校园链路吞吐或证书部署验收。
+
 `dataset-deletion-continue-running.test.js` 使用独立 SQLite、真实挂起的 locations 回包及 loopback HTTP 登录，验证继续前持久 RUNNING/清旧 error、同编号查询不重放、重复继续零派发、持久化失败零启动和 worker 等待后的认证重核。真实 logout 在回包等待期间仍阻止全部写入；保持登录直到 DELETED 后再退出不改变原结果。假桥不连接节点，也不放宽认证或删除证明。
 
 `dataset-empty-registration-api.test.js` 与 `dataset-empty-registration.test.py` 专测管理员正常注销个人 0 版本登记：完整清单与节点强证明、原 worker/回执、默认 tier 与上传历史保留、丢回执沿原编号查询，以及新版本/owner/依赖变化、软硬链接、未知上传预留、成员/旧能力/单版本/伪造字段的零派发。Python 夹具使用真实缓存和后台 worker，只替换 systemd 启动与活动探测，不连接节点或调用 GPU；既有 unregister、last-copy 与 delete-retry 仍需回归，不能把空登记分支用作任意版本的最后副本例外。
@@ -159,6 +161,23 @@ READY 与 SSD READY 分离，固定 `storageReference` 仅在服务端解析进�
 和训练准备落入缓存、旧 journal 续传仍入原根、根 inode／挂载变化拒绝、缺根不重建
 或改写 journal、非 authority 来源和客户端自报目标根在新派发前拒绝。它不操作真实
 节点、服务或 GPU，不代表生产盘速与跨机网络验收。
+
+训练项目准备与仓库池组合发布时，还须一起运行
+`training-project-preparation.test.js`、`training-project-preparation-node.test.py`、
+`training-preparation-worker.test.py` 与 `transfers-dual-root.test.py`：固定项目的私有
+准备／取消和原 UUID 不能退回普通复制，数据集的 `targetStorage` 摘要与根身份绑定
+同时保留。双根训练复制使用真实本机 TLS、显式模拟的校园物理路由，核对每次读取
+仍检查校园路线，旧 worker 不能消费新训练侧车或改写到仓库；不代表真实校园连通性。
+
+`training-preparation-bridge.test.py` 隔离加载真实执行桥 Handler，验证两个精确私有
+准备 RPC 原封转发、原固定 SSH 约束、旧只读／手动复制兼容、未知操作与机器零
+派发、节点拒绝原样返回和超时不重放。仅替换 inventory 与最终 SSH transport，
+不连接生产；该测试不证明私有部署桥已经升级。
+
+合并后的数据页浏览器夹具遵循校内直传及最后成功读数契约：废弃的个人数据
+上传脚注不能重新出现，原帮助几何负例改查仍存在的服务器整理说明；目录读取
+失败允许保留明确标旧的行，但所有旧按钮必须禁用、旧详情和训练入口必须清空。
+不通过恢复旧中转入口、删除新展示能力或降低几何／权限断言解决主线夹具漂移。
 
 ## 项目生命周期额外回归
 

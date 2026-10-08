@@ -1779,6 +1779,10 @@ def process(operation,args):
         spec=importlib.util.spec_from_file_location('gpuq_training_preparation',HERE/'training-preparation.py')
         module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
         return module.dispatch(sys.modules[__name__] if __name__ in sys.modules else SimpleNamespace(**globals()),args)
+    if operation=='storage.training.project.prepare':
+        spec=importlib.util.spec_from_file_location('gpuq_training_preparation',HERE/'training-preparation.py')
+        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        return module.project_dispatch(sys.modules[__name__] if __name__ in sys.modules else SimpleNamespace(**globals()),args)
     if operation=='datasets.training.status':return dataset_training_sources().status(args)
     if operation=='storage.training.plan':
         spec=importlib.util.spec_from_file_location('gpuq_training_storage',HERE/'training-storage.py')
@@ -2100,6 +2104,7 @@ if __name__=='__main__':
     if len(sys.argv)==4 and sys.argv[1]=='--transfer-worker':sys.exit(transfers().worker(sys.argv[2],int(sys.argv[3])))
     if len(sys.argv)==4 and sys.argv[1]=='--training-transfer-worker':sys.exit(transfers().worker(sys.argv[2],int(sys.argv[3]),require_training=True))
     if len(sys.argv)==4 and sys.argv[1]=='--project-copy-worker':sys.exit(project_copies().worker(sys.argv[2],int(sys.argv[3])))
+    if len(sys.argv)==4 and sys.argv[1]=='--training-project-copy-worker':sys.exit(project_copies().worker(sys.argv[2],int(sys.argv[3]),require_training=True))
     if len(sys.argv)==2 and sys.argv[1]=='--transfer-peer-daemon':
         spec=importlib.util.spec_from_file_location('gpuq_transfer_peer',HERE/'transfer-peer.py')
         module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)

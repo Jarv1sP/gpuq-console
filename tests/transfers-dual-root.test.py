@@ -148,6 +148,8 @@ class DualRootTraining(TF.TrainingTransfer):
         warehouse,cold,hot=dual_roots(self,self.node,self.jobs)
         self.call('transfers.start',self.f.args)
         spec=self.jobs.load(self.f.key)
+        self.assertEqual(spec['digest'],F.T.digest({k:spec[k] for k in
+            ('userId','sourceMachine','source','name','reference','timeoutSec','targetStorage')}))
         binding=TF.H.read(self.jobs.path(self.f.key,'.training.json'))
         actual=module('dual_worker_plan',DEPLOY/'training-storage.py')
         utility=importlib.util.spec_from_file_location
@@ -162,13 +164,30 @@ class DualRootTraining(TF.TrainingTransfer):
                         m.plan=lambda n,a,**kw:(plans.append(copy.deepcopy(a)) or {'fits':True,'noReclaim':True})
                 definition.loader=PlanLoader()
             return definition
-        with patch('importlib.util.spec_from_file_location',side_effect=loader):
+        campus_route=TF.F.T.PeerClient.campus_route
+        with (patch('importlib.util.spec_from_file_location',side_effect=loader),
+              patch.object(TF.F.T.PeerClient,'campus_route',side_effect=campus_route) as route):
             self.assertEqual(self.jobs.worker(self.f.key,1,require_training=True),0,self.jobs.load(self.f.key,'.result.json'))
+            self.assertGreater(route.call_count,1,'bound cache writes must retain repeated campus route checks')
         self.assertEqual(hot.load(F.USER,self.f.key)['state'],'READY')
         self.assertFalse(cold.folder(F.USER,self.f.key).exists())
         self.assertEqual(TF.H.transfer_binding(self.node,self.f.key),binding)
         self.assertEqual(self.jobs.load(self.f.key),spec)
         self.assertEqual(plans[0]['datasets'][0]['version'],self.f.version)
+
+    def test_bound_cache_transfer_cannot_use_legacy_worker_or_retarget_hdd(self):
+        warehouse,cold,hot=dual_roots(self,self.node,self.jobs)
+        self.call('transfers.start',self.f.args)
+        spec=self.jobs.load(self.f.key)
+        binding=TF.H.read(self.jobs.path(self.f.key,'.training.json'))
+        with (patch.object(TF.F.T.PeerClient,'call',side_effect=AssertionError('no source RPC')),
+              patch.object(self.jobs,'upload',side_effect=AssertionError('no target payload'))):
+            self.assertEqual(self.jobs.worker(self.f.key,1),1)
+        self.assertIn('cannot use a legacy worker',self.jobs.status(self.f.control())['error'])
+        self.assertEqual(self.jobs.load(self.f.key),spec)
+        self.assertEqual(TF.H.transfer_binding(self.node,self.f.key),binding)
+        self.assertFalse(hot.folder(F.USER,self.f.key).exists())
+        self.assertFalse(cold.folder(F.USER,self.f.key).exists())
 
 
 if __name__=='__main__':unittest.main()

@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import {mkdtemp,writeFile,readFile,rm,mkdir} from 'node:fs/promises';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
-import {createHash} from 'node:crypto';
+import {createHash,randomUUID} from 'node:crypto';
 import {spawn} from 'node:child_process';
 import {AsyncLocalStorage} from 'node:async_hooks';
 import net from 'node:net';
@@ -16,6 +16,8 @@ const hash=value=>createHash('sha256').update(value).digest('hex'),password='Tra
 const dir=await mkdtemp(join(tmpdir(),'gpuq-transfer-http-ui-')),reserve=net.createServer();await new Promise(r=>reserve.listen(0,'127.0.0.1',r));const port=reserve.address().port;await new Promise(r=>reserve.close(r));const origin='http://127.0.0.1:'+port;
 let server,service,browser;const calls=[],publicCalls=[],receipts=new Map(),uploads=new Map(),errors=[];
 const warehousePolicy={enabled:true,machine:'gpu-4',authority:'hdd'};
+const campusEndpoint='https://campus-upload.example.test',campusRevision='a'.repeat(64),campusCertificate='b'.repeat(64);
+const tickets=new Map(),directCalls=[],directErrors=[];
 const requestContext=new AsyncLocalStorage();
 const assertBridgeIdentity=(call,memberId)=>{
   if(call.op==='datasets.list')assert.deepEqual(call.args,{userId:'builtin-admin',hostAdmin:true},'fixed metadata list uses only the exact service identity');
@@ -32,7 +34,7 @@ const data=Buffer.alloc(2*1024**2+13,17),manifest=Buffer.from(JSON.stringify({di
 try{
   const bootstrap=join(dir,'bootstrap');await writeFile(bootstrap,JSON.stringify({username:'admin',password}));
   const uploadView=u=>({uploadId:u.id,name:u.spec.name,state:u.state,manifestOffset:u.manifest.length,manifestBytes:u.spec.manifestBytes,totalBytes:u.spec.totalBytes,entries:u.spec.entries,chunkBytes:1024**2,remainingBytes:u.spec.totalBytes-[...u.files.values()].reduce((n,b)=>n+b.length,0),...(u.state==='READY'?{dataset:'u-'+hash(u.owner).slice(0,16)+'-'+u.spec.name,version:hash(u.manifest)}:{})});
-  ({server,service}=await createPortalServer({database:join(dir,'db'),bootstrap,origin,secure:false,bridge:async(machine,op,args)=>{
+  const bridge=async(machine,op,args)=>{
     calls.push({machine,op,args,request:requestContext.getStore()});
     if(op==='transfers.source.prepare')return {id:args.id,token:'x'.repeat(43),...info};
     if(op==='transfers.start'){if(!receipts.has(args.id))receipts.set(args.id,{id:args.id,state:'RUNNING',bytes:123,totalBytes:data.length});return receipts.get(args.id);}
@@ -44,7 +46,8 @@ try{
     if(op==='datasets.capacity')return {filesystemBytes:1024**4,availableBytes:512*1024**3,reserveBytes:20*1024**3,usableBytes:492*1024**3,totalInodes:100000,availableInodes:50000,inodeUsageKnown:true,guarded:true};
     if(op==='datasets.upload.routes'){
       assert.equal(machine,warehousePolicy.machine);assert.equal(args.uploadId,undefined);
-      return {available:false,protocol:'dataset-upload-v1',reason:'not-configured',relayLimitBytes:256*1024**2};
+      return {available:true,protocol:'dataset-upload-v1',machine,revision:campusRevision,certificateSha256:campusCertificate,
+        routes:[{id:'primary',kind:'campus-direct',endpoint:campusEndpoint}]};
     }
     if(op==='storage.upload.admit'){
       assert.equal(machine,warehousePolicy.machine);assert.equal(args.protocol,'dataset-upload-admission-v1');
@@ -61,7 +64,7 @@ try{
       const u={id:args.uploadId,owner:args.userId,machine,admitted:true,state:'RECEIVING_MANIFEST',spec:args.specification,manifest:Buffer.alloc(0),files:new Map()};
       uploads.set(u.id,u);
       return {...uploadView(u),admissionProtocol:1,admissionKey:args.intentKey,machine,authority:'hdd',
-        uploadTransport:{protocol:'dataset-upload-v1',directAvailable:false,reason:'disabled'}};
+        uploadTransport:{protocol:'dataset-upload-v1',directAvailable:true,routeSelection:true,reason:'ready',relayAllowed:false}};
     }
     if(op==='datasets.upload.begin'){
       assert.equal(service.datasetIngressPolicy.enabled,false,'only the independent legacy transfer phase may issue bare begin');
@@ -71,14 +74,23 @@ try{
     if(op.startsWith('datasets.upload.')){
       const u=uploads.get(args.uploadId),action=op.split('.').at(-1);assert.ok(u);
       assert.equal(args.userId,u.owner);if(u.admitted)assert.equal(machine,u.machine,'modern control and bytes remain on the fixed HDD');
+      if(action==='direct-ticket'){
+        assert.equal(u.admitted,true);assert.equal(args.routeId,'primary');
+        const request=requestContext.getStore();assert.equal(request.operation,'datasets.upload.direct-ticket');assert.equal(request.userId,u.owner);
+        const ticket=randomUUID(),expiresAt=Math.floor(Date.now()/1000)+300;
+        tickets.set('Bearer '+ticket,{uploadId:u.id,owner:u.owner,machine,expiresAt,request:structuredClone(request)});
+        return {available:true,protocol:'dataset-upload-v1',endpoint:campusEndpoint,ticket,expiresAt,chunkBytes:1024**2,
+          machine,revision:campusRevision,certificateSha256:campusCertificate,routeId:'primary',kind:'campus-direct'};
+      }
       if(action==='manifest'){const part=Buffer.from(args.data,'base64');assert.equal(args.offset,u.manifest.length);u.manifest=Buffer.concat([u.manifest,part]);return {...uploadView(u),offset:u.manifest.length};}
       if(action==='seal'){assert.equal(u.manifest.length,u.spec.manifestBytes);assert.equal(hash(u.manifest),u.spec.manifestSha256);u.state='UPLOADING';u.entries=JSON.parse(u.manifest).files;assert.equal(u.entries.reduce((n,f)=>n+f.size,0),u.spec.totalBytes);assert.equal(u.entries.length+JSON.parse(u.manifest).directories.length,u.spec.entries);return uploadView(u);}
       if(action==='status'){const result=uploadView(u);if(args.path){const entry=u.entries.find(f=>f.path===args.path),bytes=u.files.get(args.path);result.file={...entry,offset:bytes?.length||0,complete:bytes!==undefined&&bytes.length===entry.size};}return result;}
-      if(action==='chunk'){const before=u.files.get(args.path)||Buffer.alloc(0),part=Buffer.from(args.data,'base64');assert.equal(before.length,args.offset);u.files.set(args.path,Buffer.concat([before,part]));return {...uploadView(u),offset:before.length+part.length,complete:true};}
+      if(action==='chunk'){const before=u.files.get(args.path)||Buffer.alloc(0),part=Buffer.from(args.data,'base64'),entry=u.entries.find(value=>value.path===args.path);assert.ok(entry);assert.equal(before.length,args.offset);assert.ok(before.length+part.length<=entry.size);u.files.set(args.path,Buffer.concat([before,part]));return {...uploadView(u),offset:before.length+part.length,complete:before.length+part.length===entry.size};}
       if(action==='commit'){for(const entry of u.entries)assert.equal(hash(u.files.get(entry.path)),entry.sha256);u.state='READY';return uploadView(u);}
       if(action==='pause')return uploadView(u);
     }throw Error('Unexpected bridge operation '+op);
-  }}));
+  };
+  ({server,service}=await createPortalServer({database:join(dir,'db'),bootstrap,origin,secure:false,bridge,directUploadOrigins:JSON.stringify([campusEndpoint])}));
   // Observe the authenticated Portal call, not a flag that a later request could
   // retroactively apply to unrelated capacity reads. Never retain the token.
   for(const method of ['invoke','datasetRead']){
@@ -101,12 +113,48 @@ try{
   installStorageArchive(service,warehousePolicy,{startTimer:false});installDatasetIngress(service,warehousePolicy);
   assert.deepEqual((await service.invoke(login.token,'state',{})).state.datasetUploadAdmission,{protocol:1,available:true,targetMachine:warehousePolicy.machine});
   browser=await chromium.launch({headless:true,...(process.env.CHROME_PATH?{executablePath:process.env.CHROME_PATH}:{})});const page=await browser.newPage({viewport:{width:1440,height:1000}});page.on('pageerror',e=>errors.push(e.message));
+  // Chromium performs the real cross-origin raw-byte request. Intercept only
+  // the trusted fixture endpoint; never route these bytes through Portal.invoke.
+  await page.route(campusEndpoint+'/**',async route=>{
+    const request=route.request(),url=new URL(request.url()),headers={'Access-Control-Allow-Origin':origin,'Access-Control-Allow-Methods':'GET,POST,OPTIONS','Access-Control-Allow-Headers':'authorization,content-type,accept'};
+    try{
+      assert.equal(request.headers().cookie,undefined,'campus requests never carry the Portal cookie');
+      assert.equal(request.headers().origin,origin);
+      if(request.method()==='OPTIONS')return await route.fulfill({status:204,headers});
+      if(url.pathname==='/capabilities'){
+        assert.equal(request.method(),'GET');assert.equal(request.headers().authorization,undefined,'probes are anonymous');
+        directCalls.push({action:'capabilities'});
+        return await route.fulfill({status:200,headers,contentType:'application/json',body:JSON.stringify({protocol:'dataset-upload-v1',machine:warehousePolicy.machine,revision:campusRevision,listenerReady:true})});
+      }
+      const match=/^\/v1\/uploads\/([a-f0-9-]+)\/(manifest|chunk|status)$/.exec(url.pathname);
+      assert.ok(match,'only the three fixed direct-upload operations are exposed');
+      const [,uploadId,action]=match,binding=tickets.get(request.headers().authorization),upload=uploads.get(uploadId);
+      if(!binding||binding.uploadId!==uploadId||binding.owner!==upload?.owner||binding.machine!==upload?.machine||binding.expiresAt<=Date.now()/1000)
+        return await route.fulfill({status:403,headers,contentType:'application/json',body:JSON.stringify({ok:false,error:'Upload authorization rejected'})});
+      assert.equal(binding.request.userId,binding.owner);assert.equal(binding.request.operation,'datasets.upload.direct-ticket');
+      assert.equal(request.method(),action==='status'?'GET':'POST');
+      const args={userId:binding.owner,uploadId};
+      if(url.searchParams.has('path'))args.path=url.searchParams.get('path');
+      const bytes=request.postDataBuffer();
+      if(action!=='status'){
+        assert.equal(request.headers()['content-type'],'application/octet-stream');assert.ok(bytes&&bytes.length<=1024**2);
+        args.offset=Number(url.searchParams.get('offset'));assert.ok(Number.isSafeInteger(args.offset)&&args.offset>=0);args.data=bytes.toString('base64');
+      }else assert.equal(bytes,null);
+      const result=await requestContext.run(binding.request,()=>bridge(binding.machine,'datasets.upload.'+action,args));
+      directCalls.push({action,uploadId,owner:binding.owner,machine:binding.machine,bytes:bytes?.length||0});
+      await route.fulfill({status:200,headers,contentType:'application/json',body:JSON.stringify({ok:true,result})});
+    }catch(error){directErrors.push(error);await route.fulfill({status:500,headers,contentType:'application/json',body:JSON.stringify({ok:false,error:'Fixture assertion failed'})});}
+  });
   const openTransfers=async()=>{const entry=page.locator('#warehouse-page-actions a[href="#datasets/transfers"]');assert.equal(await entry.textContent(),'传输记录');await entry.click();await page.locator('#page-transfers').waitFor({state:'visible'});assert.equal(await page.evaluate(()=>location.hash),'#datasets/transfers');};
   await page.goto(origin);await page.locator('#login-form [name=username]').fill(member.username);await page.locator('#login-form [name=password]').fill(password);await page.locator('#login-form [type=submit]').click();await page.locator('#login-dialog').waitFor({state:'hidden'});await page.locator('[data-nav=datasets]').click();await openTransfers();await page.locator('#transfer-copy > summary').click();await page.locator('#transfer-copy-form').waitFor();
   await page.locator('#transfer-copy-form [name=transfer-from]').selectOption('gpu-1');await page.locator('#transfer-copy-form [name=transfer-machine]').selectOption('gpu-2');await page.locator('#transfer-copy-form [name=transfer-reference]').fill('shared@'+version);await page.locator('#transfer-copy-form [name=transfer-name]').fill('browser-copy');await page.locator('#transfer-copy-form [type=submit]').click();await page.locator('#transfer-list article').filter({hasText:'browser-copy'}).waitFor();
   const entry=page.locator('#transfer-list article').filter({hasText:'browser-copy'});await entry.locator('[data-transfer-action=status]').click();page.once('dialog',d=>d.accept());await entry.locator('[data-transfer-action=cancel]').click();await entry.filter({hasText:'CANCELED'}).waitFor();
   const browserUploadStart=publicCalls.length,bridgeUploadStart=calls.length;
-  await page.locator('[data-nav=datasets]').click();await page.locator('#warehouse-page-actions [data-v3-upload]').click();await page.locator('[name=dataset-directory]').setInputFiles(join(dir,'local'));await page.locator('#v3-upload-display').fill('browser-upload');await page.locator('#v3-relay-options>summary').click();await page.locator('#v3-relay-options [data-v3-explicit-relay]').click();await page.locator('#dataset-upload-status[data-state=READY]').waitFor({state:'attached'});
+  await page.locator('[data-nav=datasets]').click();await page.locator('#warehouse-page-actions [data-v3-upload]').click();await page.locator('[name=dataset-directory]').setInputFiles(join(dir,'local'));await page.locator('#v3-upload-display').fill('browser-upload');
+  assert.equal(await page.locator('#v3-relay-options,[data-v3-explicit-relay],[name=dataset-relay-consent]').count(),0,'removed VPS upload controls are not restored by the test');
+  try{await page.locator('#dataset-upload-start').click({timeout:10000});await page.locator('#dataset-upload-status[data-state=READY]').waitFor({state:'attached'});}
+  catch(error){throw Error(`${error.message}\nUpload fixture: ${JSON.stringify({directErrors:directErrors.map(value=>value.message),directCalls,publicCalls:publicCalls.slice(browserUploadStart),routes:calls.filter(value=>value.op==='datasets.upload.routes'),status:await page.locator('#dataset-upload-status').textContent(),route:await page.locator('#v3-upload-route').textContent()})}`);}
+  assert.deepEqual(directErrors,[]);
   assert.match(await page.locator('#dataset-upload-status').textContent(),/可用于训练/);assert.equal(await page.locator('#v3-upload-state .v3-done>b').textContent(),'browser-upload');assert.equal(await page.locator('#v3-upload-state [data-use-dataset]').isEnabled(),true);
   const uploadedReference=await page.locator('#v3-upload-state [data-use-dataset]').evaluate(node=>({dataset:node.dataset.useDataset,version:node.dataset.version}));
   const browserUpload=[...uploads.values()].find(value=>value.spec.name==='data-'+hash(Buffer.from('browser-upload')).slice(0,24));assert.ok(browserUpload);assert.equal(browserUpload.state,'READY');assert.equal(uploadedReference.version,hash(browserUpload.manifest));
@@ -115,6 +163,18 @@ try{
   assert.equal(issued.length,1);assert.equal(begun.length,1);assert.notEqual(issued[0].args.key,begun[0].args.key);assert.equal(begun[0].args.key,browserUpload.id);
   assert.deepEqual(Object.fromEntries(['name','manifestBytes','manifestSha256','totalBytes','entries'].map(key=>[key,begun[0].args[key]])),browserUpload.spec);
   assert.equal(modernCalls.some(call=>call.operation==='transfers.io'||call.operation==='transfers.create'&&call.args.kind==='upload'),false,'modern datasets never create or proxy a managed transfer');
+  assert.equal(modernCalls.filter(call=>['datasets.upload.manifest','datasets.upload.chunk','datasets.workspace.put'].includes(call.operation)).length,0,'modern browser upload sends zero file/manifest byte RPCs through the public Portal');
+  assert.ok(directCalls.some(call=>call.action==='capabilities'),'the trusted campus listener is probed');
+  assert.ok(directCalls.some(call=>call.action==='status'),'resume/status uses the direct listener');
+  for(const call of directCalls.filter(call=>call.action!=='capabilities')){assert.equal(call.uploadId,browserUpload.id);assert.equal(call.owner,member.id);assert.equal(call.machine,warehousePolicy.machine);}
+  assert.equal(directCalls.filter(call=>call.action==='manifest').reduce((sum,call)=>sum+call.bytes,0),browserUpload.manifest.length);
+  assert.equal(directCalls.filter(call=>call.action==='chunk').reduce((sum,call)=>sum+call.bytes,0),data.length);
+  const ticket=[...tickets.keys()][0],beforeDenied=calls.length;
+  const denied=await page.evaluate(async({endpoint,ticket,uploadId})=>{
+    const get=(id,authorization)=>fetch(`${endpoint}/v1/uploads/${id}/status`,{credentials:'omit',headers:{Authorization:authorization}}).then(response=>response.status);
+    return [await get(uploadId,'Bearer missing-ticket'),await get('00000000-0000-4000-8000-000000000000',ticket)];
+  },{endpoint:campusEndpoint,ticket,uploadId:browserUpload.id});
+  assert.deepEqual(denied,[403,403]);assert.equal(calls.length,beforeDenied,'unknown ticket and wrong UUID never reach the node bridge');
   const modernBridge=calls.slice(bridgeUploadStart).filter(call=>call.op==='storage.upload.admit'||call.op.startsWith('datasets.upload.')&&call.op!=='datasets.upload.routes');
   assert.equal(modernBridge[0].op,'storage.upload.admit');assert.equal(modernBridge.filter(call=>call.op==='storage.upload.admit').length,1);
   assert.ok(modernBridge.every(call=>call.machine===warehousePolicy.machine&&(call.args.uploadId===browserUpload.id)),'all modern controls and bytes use the fixed HDD and issued UUID');
@@ -186,7 +246,7 @@ try{
   await mobileFit(320);
   assert.equal(await page.locator('#transfer-copy-form input,#transfer-copy-form select').evaluateAll(items=>items.every(el=>parseFloat(getComputedStyle(el).fontSize)>=16)),true,'mobile transfer fields avoid zoom');
   await capture('transfers-320');
-  console.log('Transfers HTTP/CLI/Chromium passed: upload, download bytes, background copy, list/status/cancel, shared browser upload, mobile and owner isolation.');
+  console.log('Transfers HTTP/CLI/Chromium passed: legacy CLI transfers, admitted campus browser upload with zero public byte RPCs, exact hashes, ticket/UUID denial, mobile and owner isolation.');
 }finally{await browser?.close();if(server)await new Promise(r=>server.close(r));else service?.close();await rm(dir,{recursive:true,force:true});}
 
 // Exercise grouped presentation and mission-control records in the same CI entry.
