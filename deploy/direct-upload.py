@@ -318,6 +318,8 @@ class DirectUploads:
         self.probe(config)
         with self.u.direct_guard(user, upload):
             session = self.u.load(user, upload)
+            if session.get('archive') and route['kind'] != 'campus-direct':
+                raise ValueError('Archive upload requires the campus offset transport')
             if session['state'] in ('DISCARDED', 'DISCARDING', 'READY') or session.get('directPaused') is True:
                 raise ValueError('Upload does not accept a direct grant')
             claims = {'schema': 1, 'machine': config['machine'], 'userId': user,
@@ -408,7 +410,8 @@ class DirectUploads:
                 return self.u.status(user, {'uploadId': upload, **args})
             if action not in ('manifest', 'chunk') or set(args) != ({'offset'} if action == 'manifest' else {'offset', 'path'}):
                 raise ValueError('Invalid direct upload fields')
-            extra = {'direct_chunk_limit': claims.get('maxChunkBytes', self.u.d.CHUNK_BYTES)} if action == 'chunk' else {}
+            extra = {'direct_chunk_limit': claims.get('maxChunkBytes', self.u.d.CHUNK_BYTES),
+                     'direct_authorize': lambda: self.authorize(token, claims, upload, action)} if action == 'chunk' else {}
             route = next(row for row in self.routes(self.configuration()) if row['id'] == claims.get('routeId', 'primary'))
             return getattr(self.u, action+'_bytes')(user, {'uploadId': upload, **args}, args['offset'], data, transport=route['kind'], **extra)
 

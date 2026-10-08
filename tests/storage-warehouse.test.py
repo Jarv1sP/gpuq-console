@@ -69,6 +69,15 @@ class WarehouseTests(unittest.TestCase):
             for file in files:os.chmod(Path(folder)/file,0o600)
         self.tmp.cleanup()
 
+    def test_archive_declaration_is_forwarded_only_to_fixed_hdd_view(self):
+        self.node.CONFIG['datasets']['archiveUpload']={'enabled':True,'maxExpandedBytes':1024,'maxEntries':20}
+        real=D.DatasetCache
+        with patch.object(D,'DatasetCache',side_effect=lambda root,**kwargs:real(root,**{key:value for key,value in kwargs.items() if key!='mount_point'})):
+            warehouse=W.Warehouse(self.node)
+        self.assertEqual(warehouse.view.CONFIG['datasets']['archiveUpload'],self.node.CONFIG['datasets']['archiveUpload'])
+        self.assertEqual(U.DatasetUploads(warehouse.view).archive.capability()['protocol'],1)
+        self.assertIsNone(U.DatasetUploads(self.node).archive.capability(),'The SSD training cache must not claim archive intake')
+
     def test_hdd_ready_does_not_claim_ssd_ready(self):
         result=self.w.status(OWNER,'tiny',self.version)
         self.assertEqual(result['state'],'REGISTERED');self.assertTrue(result['warehouseReady'])

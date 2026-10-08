@@ -33,6 +33,15 @@ ADMISSION_PROTOCOL = 'dataset-upload-admission-v1'
 SPECIFICATION_FIELDS = ('name', 'manifestBytes', 'manifestSha256', 'totalBytes', 'entries')
 
 
+_archive_spec = importlib.util.spec_from_file_location('dataset_archive_intake', Path(__file__).with_name('dataset-archive-intake.py'))
+A = importlib.util.module_from_spec(_archive_spec)
+_archive_spec.loader.exec_module(A)
+
+def upload_specification(value):
+    result = {key:value[key] for key in SPECIFICATION_FIELDS}
+    if 'archive' in value: result['archive'] = A.specification(value['archive'], value['totalBytes'], value['entries'])
+    return result
+
 DIRECT_FILE_CHUNK_BYTES = 16 * 1024 * 1024
 _CACHE_PREPARATION = ContextVar('dataset_upload_cache_preparation', default=None)
 
@@ -54,6 +63,7 @@ class DatasetUploads:
         self.root = self.cache.root/'.uploads'
         self.d._mkdir(self.root)
         self.d._mkdir(self.root/'bindings')
+        self.archive = A.ArchiveIntake(self)
 
     def cache_only(self):
         # Existing trusted node policy, never a public request option. Members
@@ -145,7 +155,7 @@ class DatasetUploads:
         return self.cache.root/'.upload-admissions'/(self.key(user, upload)+'.json')
 
     def _specification(self, spec):
-        if (not isinstance(spec, dict) or set(spec) != set(SPECIFICATION_FIELDS)
+        if (not isinstance(spec, dict) or set(spec) != set(SPECIFICATION_FIELDS) | ({'archive'} if 'archive' in spec else set())
                 or not isinstance(spec.get('name'), str) or not NAME.fullmatch(spec['name'])
                 or not isinstance(spec.get('manifestSha256'), str) or not HASH.fullmatch(spec['manifestSha256'])
                 or any(type(spec.get(k)) is not int or not 0 <= spec[k] <= maximum
@@ -153,7 +163,7 @@ class DatasetUploads:
                            ('manifestBytes', self.d.MAX_JSON_BYTES),
                            ('totalBytes', self.limits['maxUploadBytes']), ('entries', self.d.MAX_ENTRIES)))):
             raise ValueError('Invalid complete server upload specification')
-        spec = {k: spec[k] for k in SPECIFICATION_FIELDS}
+        spec = upload_specification(spec)
         digest = hashlib.sha256(json.dumps(spec, ensure_ascii=False, separators=(',', ':')).encode()).hexdigest()
         reserve = spec['totalBytes']+spec['manifestBytes']*4+spec['entries']*8192+65536
         if reserve > 2**63-1:
@@ -216,6 +226,21 @@ class DatasetUploads:
                 or args['authority'] != policy.get('authority')):
             raise PermissionError('Server upload admission requires this fixed HDD authority')
         spec, digest, reserve = self._specification(args['specification'])
+        if self.archive.capability() and not spec.get('archive'):
+            try:
+                previous = self.d._read_json(self.admission_path(args['userId'], args['uploadId']))
+            except FileNotFoundError:
+                previous = None
+            if not previous or previous.get('specification') != spec:
+                A.fail('ARCHIVE_FORMAT_UNSUPPORTED', '仓库只接受单个压缩包')
+        if spec.get('archive') is not None:
+            capability = self.archive.capability()
+            if not capability or spec['archive']['format'] not in capability['formats']:
+                A.fail('ARCHIVE_FORMAT_UNSUPPORTED', '仓库尚未开通压缩包上传')
+            if spec['archive']['bytes'] > capability['maxBytes']:
+                A.fail('ARCHIVE_TOO_LARGE', '压缩包过大')
+            if args.get('allowRelay') is True:
+                A.fail('CAMPUS_ROUTE_UNAVAILABLE', '压缩包只走校内直连')
         if args['specificationSha256'] != digest:
             raise ValueError('Server upload specification digest changed')
         return dict(schema=1, protocol=ADMISSION_PROTOCOL, userId=args['userId'],
@@ -254,10 +279,10 @@ class DatasetUploads:
                 or any(type(value) is not int for value in bound.get('rootIdentity', ()))
                 or type(bound.get('reserveBytes')) is not int
                 or bound.get('reserveBytes') != session['reserveBytes']
-                or bound.get('specification') != {k: session[k] for k in SPECIFICATION_FIELDS}
+                or bound.get('specification') != upload_specification(session)
                 or session.get('archiveAdmission') is not None):
             raise ValueError('Server upload admission identity changed')
-        spec = {k: session[k] for k in SPECIFICATION_FIELDS}
+        spec = upload_specification(session)
         if bound['specificationSha256'] != hashlib.sha256(json.dumps(spec, ensure_ascii=False, separators=(',', ':')).encode()).hexdigest():
             raise ValueError('Server upload admission specification changed')
 
@@ -324,6 +349,10 @@ class DatasetUploads:
                 or value['reserveBytes'] != value['totalBytes']+value['manifestBytes']*4+value['entries']*8192+65536
                 or not isinstance(value.get('manifestSha256'), str) or not HASH.fullmatch(value['manifestSha256'])):
             raise ValueError('Corrupt personal upload identity')
+        if any(type(value[k]) is not int or not 0<=value[k]<=2**63-1 for k in ('expandedReserveBytes','expandedEntries') if k in value):
+            raise ValueError('Corrupt expanded archive accounting')
+        if 'archive' in value:
+            A.specification(value['archive'], value['totalBytes'], value['entries'])
         lane = value.get('archiveAdmission')
         if lane is not None:
             if (not isinstance(lane, dict) or set(lane) != {'schema', 'transferId', 'targetMachine', 'authority', 'sourceMachine', 'reference'}
@@ -475,6 +504,7 @@ class DatasetUploads:
                 if self._ready(session):
                     self._unlink(self.reservation(session['userId'], session['uploadId']))
                     result['state'] = 'READY'
+                    if session.get('archive'): result['archivePhase'] = 'READY'
                     result.pop('error', None)
                     result.pop('resumeState', None)
                     # Recover a committed publish whose worker died before its
@@ -495,9 +525,11 @@ class DatasetUploads:
 
     def result(self, session):
         result = {k: session[k] for k in ('uploadId', 'name', 'state', 'manifestBytes', 'totalBytes',
-            'entries', 'dataset', 'version', 'error', 'resumeState', 'lastConfirmedRoute') if k in session}
+            'entries', 'dataset', 'version', 'error', 'resumeState', 'lastConfirmedRoute', 'archivePhase', 'reasonCode', 'expandedBytes', 'expandedEntries') if k in session}
         result.update(manifestOffset=self._size(self.folder(session['userId'], session['uploadId'])/'manifest.part'),
                       chunkBytes=self.d.CHUNK_BYTES)
+        if session.get('archive'):
+            result['phase'] = session.get('archivePhase') or ('FAILED' if session['state']=='FAILED' else 'UPLOADING')
         if session['state'] == 'READY':
             result['remainingBytes'] = 0
         elif 'version' in session and session['state'] != 'DISCARDED':
@@ -546,7 +578,7 @@ class DatasetUploads:
         digest = args.get('manifestSha256')
         if not isinstance(digest, str) or not HASH.fullmatch(digest):
             raise ValueError('Invalid manifest SHA256')
-        specification = {k: args[k] for k in ('name', 'manifestBytes', 'manifestSha256', 'totalBytes', 'entries')}
+        specification = upload_specification(args)
         archive = self._archive_binding(user, args, _archive_transfer) if _archive_transfer is not None else None
         with self.cache._locked():
             marker_present = True
@@ -614,9 +646,9 @@ class DatasetUploads:
             # An administrator may choose a shared-volume policy instead of
             # per-member byte budgets. Physical free-space/inode reservation
             # below remains mandatory; zero never disables those protections.
-            if self.limits['maxUserBytes'] and sum(s['reserveBytes'] for s in retained)+reserve > self.limits['maxUserBytes']:
+            if self.limits['maxUserBytes'] and sum(s['reserveBytes']+s.get('expandedReserveBytes',0) for s in retained)+reserve > self.limits['maxUserBytes']:
                 raise ValueError('Personal dataset storage quota reached (including metadata allowance)')
-            if sum(s['entries'] for s in retained)+args['entries'] > self.limits['maxUserEntries']:
+            if sum(max(s['entries'],s.get('expandedEntries',0)) for s in retained)+args['entries'] > self.limits['maxUserEntries']:
                 raise ValueError('Personal dataset entry quota reached')
             self.cache._budget(reserve)
             self.cache._free(self.cache._reserved()+reserve, needed_inodes=args['entries']+16)
@@ -678,7 +710,9 @@ class DatasetUploads:
         if isinstance(config, dict) and config.get('enabled') is False:
             return {'available': False, 'reason': 'disabled'}
         try:
-            return self.direct().availability()
+            value = self.direct().availability()
+            capability = self.archive.capability()
+            return {**value, **({'archive':capability} if capability else {})}
         except Exception:
             # Optional direct ingress must fail closed without disabling the
             # explicitly permitted small-file legacy control/data path.
@@ -706,6 +740,7 @@ class DatasetUploads:
 
     def relay_allowed(self, user, upload):
         session = self.load(user, upload)
+        if session.get('archive'): A.fail('CAMPUS_ROUTE_UNAVAILABLE', '压缩包只走校内直连')
         if session['totalBytes'] > RELAY_LIMIT_BYTES and session.get('relayAllowed') is not True:
             raise ValueError('Large upload requires direct transport or explicit allowRelay; no VPS fallback was performed')
 
@@ -778,6 +813,7 @@ class DatasetUploads:
             self.save(session)
 
     def _entry(self, session, path):
+        if session.get('archive'): return self.archive.entry(session, path)
         self.d._relative(path)
         index = self.folder(session['userId'], session['uploadId'])/'index.sqlite'
         with self.d._directory(index.parent) as parent:
@@ -858,7 +894,7 @@ class DatasetUploads:
         if type(offset) is not int or not 0 <= offset <= 2**63-1 or not isinstance(data, bytes) or len(data) > limit:
             raise ValueError('Invalid raw upload chunk or offset')
 
-    def chunk_bytes(self, user, args, offset, data, *, transport='vps-relay', direct_chunk_limit=None):
+    def chunk_bytes(self, user, args, offset, data, *, transport='vps-relay', direct_chunk_limit=None, direct_authorize=None):
         upload = args['uploadId']
         self.require_ingress(user, upload)
         # Only the authenticated direct data plane can use large file blocks.
@@ -869,6 +905,9 @@ class DatasetUploads:
                 raise ValueError('Invalid authenticated direct chunk limit')
             limit = direct_chunk_limit
         self.raw_chunk(offset, data, limit=limit)
+        session = self.load(user, upload)
+        if session.get('archive'):
+            return self.archive.chunk(user, args, offset, data, transport, direct_authorize)
         with self.guard(user, upload):
             session = self.effective(self.load(user, upload))
             self.require_ingress(user, upload, session)
@@ -899,6 +938,9 @@ class DatasetUploads:
     def status(self, user, args):
         session = self.effective(self.load(user, args['uploadId']))
         result = self.result(session)
+        if 'path' in args and session.get('archive'):
+            result['file'] = self.archive.status(session, args['path'])
+            return result
         if 'path' in args:
             if session['state'] not in ('UPLOADING', 'READY', 'FAILED') or 'indexIdentity' not in session:
                 raise ValueError('Upload manifest has not been sealed')
@@ -990,7 +1032,7 @@ class DatasetUploads:
     def binding(self, dataset, version):
         return self.root/'bindings'/(hashlib.sha256((dataset+'@'+version).encode()).hexdigest()+'.json')
 
-    def seal(self, session):
+    def seal(self, session, *, _archive_manifest=None, _archive_data=None):
         self.require_ingress(session['userId'], session['uploadId'], session)
         user, upload = session['userId'], session['uploadId']
         folder = self.folder(user, upload)
@@ -1008,6 +1050,10 @@ class DatasetUploads:
         if (len(manifest['files'])+len(manifest['directories']) != session['entries']
                 or sum(f['size'] for f in manifest['files']) != session['totalBytes']):
             raise ValueError('Manifest totals differ from the admitted upload')
+        if session.get('archive'):
+            if _archive_manifest is None:
+                return self.archive.seal(session, manifest)
+            manifest = self.d._manifest(_archive_manifest)
         dataset = 'u-'+hashlib.sha256(user.encode()).hexdigest()[:16]+'-'+session['name']
         version = self.d._version(manifest)
         actor = self.actor(user)
@@ -1090,6 +1136,8 @@ class DatasetUploads:
                     # free the payload before its replacement stage exists.
                     self.d._write_json(self.reservation(user, upload),
                                        self.reservation_value(session, sealed=True, budget_sealed=False))
+                    if _archive_data is not None:
+                        self.archive.stage(session, manifest, _archive_data)
                     plan = self.cache._plan(actor, dataset, version,
                                             reservation_credit=self.cache._footprint(manifest))
                     self.d._write_json(self.reservation(user, upload), self.reservation_value(session, sealed=True))
@@ -1100,7 +1148,7 @@ class DatasetUploads:
                     session.update(state='READY')
                     self._unlink(self.reservation(user, upload))
                 else:
-                    session.update(state='UPLOADING', transferToken=plan['token'])
+                    session.update(state='PUBLISHING' if _archive_manifest is not None else 'UPLOADING', transferToken=plan['token'])
                 self.save(session)
         finally:
             self._unlink(temporary)
@@ -1151,6 +1199,7 @@ class DatasetUploads:
             self._unlink(self.reservation(user, upload))
         for name in ('manifest.part', 'index.sqlite', 'index.pending', 'chunk.json'):
             self._unlink(self.folder(user, upload)/name)
+        if session.get('archive'): self.archive.cleanup(session)
         session.update(state='DISCARDED')
         session.pop('error', None)
         session.pop('resumeState', None)
@@ -1175,6 +1224,13 @@ class DatasetUploads:
                 if action == 'seal':
                     self.seal(session)
                 elif action == 'commit':
+                    if session.get('archive'):
+                        self.archive.prepare(session)
+                        if session['state'] == 'READY':
+                            session['archivePhase'] = 'READY'
+                            self.save(session)
+                            self.archive.cleanup(session)
+                            return 0
                     actor = self.actor(user)
                     archive = None
                     # Peer copies use this same uploader but are not new user
@@ -1199,6 +1255,9 @@ class DatasetUploads:
                             session['transferToken'], (record, identity),
                             _guard=lambda: (self.require_ingress(user, upload, session), self._check(session)))
                     session.update(state='READY')
+                    if session.get('archive'):
+                        session['archivePhase'] = 'READY'
+                        self.archive.cleanup(session)
                     with self.cache._locked():
                         self._unlink(self.reservation(user, upload))
                     self.save(session)
@@ -1219,12 +1278,15 @@ class DatasetUploads:
                     message = (os.strerror(error.errno) if isinstance(error, OSError) and error.errno
                         else str(error) if isinstance(error, ValueError) else 'Upload operation failed; inspect node logs')
                     session.update(state='FAILED', resumeState=TRANSIENT[expected], error=message[:300])
+                    if session.get('archive'):
+                        session['archivePhase'] = 'FAILED'
+                        session['reasonCode'] = getattr(error, 'reasonCode', 'ARCHIVE_PUBLISH_FAILED')
                 self.save(session)
                 return 0 if committed else 1
             return 0
 
     def process(self, operation, args):
-        fields = {'begin': {'name', 'key', 'manifestBytes', 'manifestSha256', 'totalBytes', 'entries', 'allowRelay'},
+        fields = {'begin': {'name', 'key', 'manifestBytes', 'manifestSha256', 'totalBytes', 'entries', 'allowRelay', 'archive'},
                   'manifest': {'uploadId', 'offset', 'data'}, 'seal': {'uploadId'},
                   'status': {'uploadId', 'path'}, 'chunk': {'uploadId', 'path', 'offset', 'data'},
                   'commit': {'uploadId'}, 'discard': {'uploadId'}, 'pause': {'uploadId'},
@@ -1233,7 +1295,7 @@ class DatasetUploads:
         if (action not in fields or not isinstance(args, dict) or set(args)-fields[action]-{'userId', 'hostAdmin'}
                 or ('hostAdmin' in args and args['hostAdmin'] is not False)):
             raise ValueError('Invalid personal upload fields')
-        required = fields[action]-({'path'} if action == 'status' else {'allowRelay'} if action == 'begin' else {'routeId'} if action == 'direct-ticket' else set())
+        required = fields[action]-({'path'} if action == 'status' else {'allowRelay', 'archive'} if action == 'begin' else {'routeId'} if action == 'direct-ticket' else set())
         if not required <= set(args) or 'userId' not in args:
             raise ValueError('Missing personal upload fields')
         user = args['userId']

@@ -500,3 +500,16 @@ gpuctl data retire-discard-registration OPERATION_ID --machine SERVER --key UUID
 任务显示当前步骤、原服务器 ID 和服务器原因，不画百分比。UNKNOWN 只提供重新查询；DELETED 显示服务器的 retainUntil，并注明「其他名称下的副本不受影响」，不声称磁盘空间已释放。403 和能力未开通的 409 保留后台原文。成员看到需继续、取消或恢复的任务时显示「需要管理员处理」，不渲染管理按钮。管理员继续沿用原 operationId；取消先确认停止后续删除并还原数据、不强制中断已执行步骤；恢复由管理员选择任务中已确认完整的保留副本，回执可能使用真实物理别名且不带 key，网页核对绑定后再查询原任务。所有未知写结果都不自动重放。
 
 上传首次初始化回执丢失时保留服务器签发的原 UUID。重复原上传命令先查询该编号；只有固定仓库按本人账号、原准入和完整清单返回 `NOT_INITIALIZED` 的只读证明，且当前策略未变，才使用同一编号恢复初始化。普通 400/404、503、ENOENT、损坏或缺失控制记录都不是该证明，不能授权换编号或自动重发。
+
+
+## Single-archive campus intake (protocol 1)
+
+A node declares `archive:{protocol:1,formats:["zip","tar","tar.gz"],maxBytes}` on its authenticated upload-routes response only after the complete archive-intake runtime is installed and the trusted fixed-HDD configuration explicitly enables `datasets.archiveUpload.enabled`. Portal projects this declaration as `datasetUploadAdmission.archive`; absent or malformed capability preserves the directory uploader. `.tgz` is an alias of declared `tar.gz`. Existing directory UUIDs retain their original specification when the new capability is enabled; fresh directory admissions are refused.
+
+`datasets.upload.admission.create` binds the original key and node upload UUID to the single archive specification `{protocol:1,fileName,format,bytes,sha256}`, alongside the transport-manifest hash/length, one entry and compressed byte count. Only the declared campus-direct route can issue this archive's ticket or accept its raw bytes. Client disconnects query the original UUID and confirmed offset; neither relay nor a new key is selected automatically.
+
+The intake reports `phase:UPLOADING|EXTRACTING|VERIFYING|READY|FAILED`, with `reasonCode` on failure and the ordinary immutable dataset/version fields only after registration. The compressed file is never itself a registered dataset. The worker verifies the compressed hash, performs a bounded inspection, checks available warehouse bytes/inodes and retained-principal quotas, safely extracts into its own new scratch tree, hashes every extracted file, then uses the existing fenced registration and atomic publication path. Only confirmed READY means the unpacked version is available.
+
+Absolute/traversal paths, all symlinks/hardlinks, devices and special files, conflicting entries, encrypted or unsupported-compression ZIPs, and malformed archives are refused. Trusted limits `archiveUpload.maxExpandedBytes` (defaults to the upload byte limit) and `archiveUpload.maxEntries` (defaults to the dataset entry limit) cannot exceed those existing limits. Metadata and decompression buffers are bounded; ZIP supports stored and deflate entries. Errors include `ARCHIVE_FORMAT_UNSUPPORTED`, `ARCHIVE_UNSAFE_PATH`, `ARCHIVE_TOO_LARGE`, `ARCHIVE_CORRUPT`, `ARCHIVE_EMPTY`, `ARCHIVE_PUBLISH_FAILED`, and `CAMPUS_ROUTE_UNAVAILABLE`.
+
+Deployment is a paired Portal/CLI and immutable node-runtime release. Preserve each live runtime's other patches; enable the capability only on a fixed HDD warehouse after a no-training/no-upload or approved maintenance window. Adding this code to GitHub alone does not declare a live capability.

@@ -73,7 +73,7 @@ if type(retention) is not int or not 1<=retention<=365:raise SystemExit('Invalid
 node_config['diagnosticsRetentionDays']=retention
 datasets=node.get('datasets',previous.get('datasets'))
 if datasets is not None:
-    if not isinstance(datasets,dict) or set(datasets)-{'root','mountPoint','sources','reserveBytes','uploads'}:raise SystemExit('Invalid node dataset configuration')
+    if not isinstance(datasets,dict) or set(datasets)-{'root','mountPoint','sources','reserveBytes','uploads','archiveUpload'}:raise SystemExit('Invalid node dataset configuration')
     if datasets.get('mountPoint','/data2')!='/data2' or datasets.get('root','/data2/datasets')!='/data2/datasets':raise SystemExit('Managed dataset storage must use /data2/datasets on the verified /data2 mount')
     if '--ro-bind-fd' not in help_bwrap:raise SystemExit('Datasets require bubblewrap --ro-bind-fd support')
     module=importlib.util.spec_from_file_location('gpuq_install_dataset_cache',dest/'dataset-cache.py');cache_module=importlib.util.module_from_spec(module);sys.modules[module.name]=cache_module;module.loader.exec_module(cache_module)
