@@ -163,7 +163,7 @@ class ProjectCopies(t.TransferJobs):
              and isinstance(source['token'],str) and re.fullmatch('[A-Za-z0-9_-]{43}',source['token'])
              and isinstance(source['manifestSha256'],str) and t.HASH.fullmatch(source['manifestSha256'])
              and type(source['manifestBytes']) is int and 1<=source['manifestBytes']<=p.MAX_MANIFEST
-             and type(source['totalBytes']) is int and 0<=source['totalBytes']<=p.MAX_IMAGE+self.store.max_bytes+2*p.MAX_MANIFEST
+             and type(source['totalBytes']) is int and 0<=source['totalBytes']<=self.store.MAX_BYTES
              and type(source['entries']) is int and 0<=source['entries']<=self.store.max_entries+7,'Invalid immutable project source grant')
         ProjectPeer(self.n.CONFIG.get('transferPeers',{}).get(machine),source).close()
         return self.start_spec(args,{**{k:args[k] for k in ('userId','project','release','sourceMachine','source')},'role':'import'})
@@ -194,6 +194,7 @@ class ProjectCopies(t.TransferJobs):
         return {'id':spec['id'],'state':state,'attempt':spec['attempt'],'project':spec['project'],'release':spec['release'],
                 'role':spec['role'],'route':'lan','bytes':progress.get('bytes',0),
                 'totalBytes':spec.get('source',{}).get('totalBytes'),
+                'warnings':self.store.size_warnings(spec['source']['totalBytes']) if 'source' in spec else [],
                 'error':result.get('error'),'developmentChanged':False}
 
     def cancel(self,args):

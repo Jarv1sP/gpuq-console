@@ -416,6 +416,11 @@ def _dataset_op(operation,args,*,_request_id=None,_expected_registration=None,_e
         # transfer without learning its initiating identity or host source.
         for item in listing['datasets']:
             for version in item['versions']:
+                if version.get('errorCode')=='CACHE_METADATA_INCOMPLETE':
+                    # Display UNKNOWN cannot authorize recovery/deletion or
+                    # consume the trusted catalog snapshot used by workers.
+                    version['deletionPermissions']={'allowed':False,'memberAllowed':False,'reason':'CACHE_METADATA_INCOMPLETE'}
+                    continue
                 if dataset_delete_capability()==1:
                     version['deletionPermissions']=cache.deletion_permissions(actor,item['dataset'],version['version'])
                 if version['state']=='READY':continue
@@ -423,8 +428,16 @@ def _dataset_op(operation,args,*,_request_id=None,_expected_registration=None,_e
                     version.update(canPrepare=True,recoveryConfigured=True)
                 pending=dataset_current_prepare(folder,item['dataset'],version['version'])
                 if pending:
-                    current=dataset_background_status(folder,*pending,cache,actor,
-                        catalog_snapshot=snapshots[(item['dataset'],version['version'])])
+                    try:
+                        current=dataset_background_status(folder,*pending,cache,actor,
+                            catalog_snapshot=snapshots[(item['dataset'],version['version'])])
+                    except module.CacheMetadataIncomplete:
+                        # A required parent may disappear after the display
+                        # snapshot. Strict status/admission remains unchanged.
+                        version.update(cache._catalog_incomplete(version))
+                        version['deletionPermissions']={'allowed':False,'memberAllowed':False,'reason':'CACHE_METADATA_INCOMPLETE'}
+                        version.pop('recoveryConfigured',None)
+                        continue
                     version.update({k:v for k,v in current.items() if k in ('state','operationId','error')})
         if dataset_delete_capability()==1:listing['datasetDelete']=1
         warehouse=storage_warehouse()
@@ -437,8 +450,16 @@ def _dataset_op(operation,args,*,_request_id=None,_expected_registration=None,_e
             originals=warehouse.list(actor)
             for item in originals['datasets']:
                 for value in item['versions']:
+                    if value.get('errorCode')=='CACHE_METADATA_INCOMPLETE':continue
                     pending=dataset_current_prepare(folder,item['dataset'],value['version'])
-                    if pending:value.update(dataset_background_status(folder,*pending,cache,actor))
+                    if pending:
+                        try:value.update(dataset_background_status(folder,*pending,cache,actor))
+                        except module.CacheMetadataIncomplete:
+                            value.update(cache._catalog_incomplete(value))
+                            value.update(warehouseReady=False,warehouseCanPrepare=False,
+                                deletionPermissions={'allowed':False,'memberAllowed':False,'reason':'CACHE_METADATA_INCOMPLETE'})
+                            value.pop('storageReference',None)
+                            value.pop('recoveryConfigured',None)
                     value.pop('dataset',None)
             listing['datasets'].extend(originals['datasets'])
         return listing
@@ -919,7 +940,7 @@ def file_op(operation,args,root=None):
             return {'entries':out}
         if not parts:raise ValueError('File path required')
         offset=args.get('offset',0)
-        if type(offset)!=int or not 0<=offset<=100*1024**3:raise ValueError('Invalid offset')
+        if type(offset)!=int or not 0<=offset<=2**53-1:raise ValueError('Invalid offset')
         f=os.open(parts[-1],(os.O_RDWR|os.O_CREAT if operation=='files.put' else os.O_RDONLY)|os.O_NOFOLLOW|os.O_NONBLOCK,0o600,dir_fd=fd)
         try:
             st=os.fstat(f)
@@ -931,7 +952,7 @@ def file_op(operation,args,root=None):
                     if offset!=0:raise ValueError('Invalid truncate offset')
                     os.ftruncate(f,0);st=os.fstat(f)
                 if offset!=st.st_size:raise ValueError('Upload offset mismatch; restart this file')
-                if st.st_size+len(data)>100*1024**3:raise ValueError('File too large')
+                if st.st_size+len(data)>2**53-1:raise ValueError('File byte count is not exact')
                 os.lseek(f,offset,0)
                 view=memoryview(data)
                 while view:view=view[os.write(f,view):]

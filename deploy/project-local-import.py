@@ -181,7 +181,7 @@ class LocalImports:
     def status(self,args):
         self.identity(args);value=self.load(args)
         result={'protocol':PROTOCOL,'key':args['key'],'project':args['project'],
-                **{k:value[k] for k in ('state','phase','files','bytes','totalFiles','totalBytes','manifestSha256','error','sourcePath','destinationPath') if k in value},
+                **{k:value[k] for k in ('state','phase','files','bytes','totalFiles','totalBytes','warnings','manifestSha256','error','sourcePath','destinationPath') if k in value},
                 'sourcePath':value['request']['sourcePath'],'destinationPath':value['request']['destinationPath'],
                 'draftChanged':value['state']=='IMPORTED'}
         if value['state'] not in FINAL:
@@ -256,7 +256,8 @@ class LocalImports:
                     finally:os.close(child)
                 elif stat.S_ISREG(info.st_mode) and info.st_nlink==1:
                     count+=1;total+=info.st_size
-                    if count>self.store.max_entries or total>self.store.max_bytes:raise ValueError('Local import exceeds project file/byte budget')
+                    if count>self.store.max_entries:raise ValueError('Local import exceeds project file budget')
+                    self.store.size_warnings(total)
                     rows.append({'path':path,'kind':'file','stamp':stamp(info),'size':info.st_size})
                 else:raise ValueError('Only ordinary directories and single-link regular files can be imported')
                 if progress is not None and time.monotonic()-last>=1:
@@ -283,10 +284,11 @@ class LocalImports:
                 rows,total,count=self.scan(source,lambda files,size:self.write(args,{**value,'phase':'SCANNING','files':files,'bytes':size}))
                 dev=self.store.dev_paths(user,project)
                 existing=self.store._scan_totals({'code':dev['code'],'env':dev['env']},lambda *args:None)
-                if existing['bytes']+total>self.store.max_bytes or existing['entries']+len(rows)>self.store.max_entries:
-                    raise ValueError('Existing draft plus local import exceeds the project publication budget')
+                if existing['entries']+len(rows)>self.store.max_entries:
+                    raise ValueError('Existing draft plus local import exceeds the project entry budget')
+                warnings=self.store.size_warnings(existing['bytes']+total)
                 self.store._space(total)
-                value={**value,'totalFiles':count,'totalBytes':total,'phase':'COPYING','files':0,'bytes':0}
+                value={**value,'totalFiles':count,'totalBytes':total,'warnings':warnings,'phase':'COPYING','files':0,'bytes':0}
                 self.write(args,value)
                 folder=self.folder(args);stage_path=folder/(key+'.staging')
                 self.s.private_dir(stage_path,create=True);self.store._quota(user,stage_path)

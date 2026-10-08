@@ -626,8 +626,8 @@ class PersonalOCI:
         need(immutable_image_id(image.get('Id')) == image_id and image.get('Os') == 'linux'
              and image.get('Architecture') == architecture and isinstance(layers, list)
              and 1 <= len(layers) <= 256 and all(isinstance(v, str) and IMAGE.fullmatch(v) for v in layers)
-             and type(image.get('Size')) is int and 0 < image['Size'] <= 100*1024**3,
-             'Published OCI image is incompatible or exceeds the 100 GiB transfer limit')
+             and type(image.get('Size')) is int and 0 < image['Size'] <= self.s.ProjectStore.MAX_BYTES,
+             'Published OCI image is incompatible or its byte count is not exact')
         return {'schema':1, 'image':image_id, 'os':'linux', 'architecture':architecture,
                 'diffIds':layers, 'unpackedBytes':image['Size']}
 
@@ -673,7 +673,7 @@ class PersonalOCI:
             self.run('save', '--signature-policy', str(self.folder/name),
                      '--format=oci-archive', '--output', str(archive), image['image'], timeout=1800)
         self.s.require_workspace_space(self.root, self.s.workspace_reserve_bytes(self.config))
-        with self.portable_archive(archive, 100*1024**3) as fd:
+        with self.portable_archive(archive, self.s.ProjectStore.MAX_BYTES) as fd:
             size = os.fstat(fd).st_size
             need(size > 0, 'Empty OCI archive')
             checksum = hashlib.sha256()
@@ -698,7 +698,7 @@ class PersonalOCI:
              and identity.get('architecture') == architecture and isinstance(identity.get('diffIds'), list)
              and 1 <= len(identity['diffIds']) <= 256
              and all(isinstance(v, str) and IMAGE.fullmatch(v) for v in identity['diffIds'])
-             and all(type(identity.get(k)) is int and 0 < identity[k] <= 100*1024**3
+             and all(type(identity.get(k)) is int and 0 < identity[k] <= self.s.ProjectStore.MAX_BYTES
                      for k in ('archiveBytes','unpackedBytes'))
              and isinstance(identity.get('archiveSha256'), str)
              and re.fullmatch('[a-f0-9]{64}', identity['archiveSha256']), 'Invalid portable image identity')

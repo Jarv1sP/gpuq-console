@@ -58,6 +58,7 @@ class LocalImportTests(base.ProjectSecurity):
             return self.imports.worker(*self.ops.identity(self.args),self.request['key'])
 
     def test_node_rpc_begins_fenced_and_full_local_copy_never_uses_chunk_rpc(self):
+        self.ops.store.warning_bytes=1
         start=self.begin();self.assertEqual(start['state'],'IMPORTING');self.assertFalse(start['draftChanged'])
         self.assertTrue(self.imports.project_pointer(self.request).exists())
         with self.assertRaisesRegex(ValueError,'pending'):self.ops.writable(self.args)
@@ -65,6 +66,10 @@ class LocalImportTests(base.ProjectSecurity):
         self.assertEqual(self.worker(),0)
         result=self.node.process('projects.local-import.status',self.reference())
         self.assertEqual((result['state'],result['files'],result['draftChanged']),('IMPORTED',2,True))
+        self.assertEqual(result['warnings'][0]['code'],'LARGE_PROJECT')
+        self.assertEqual(result['warnings'][0]['warningBytes'],1)
+        self.assertFalse(result['warnings'][0]['blocking'])
+        self.assertGreaterEqual(result['warnings'][0]['bytes'],result['totalBytes'])
         self.assertEqual((self.code/'imported'/'nested'/'weights.bin').read_bytes(),(self.source/'nested'/'weights.bin').read_bytes())
         self.assertEqual((self.code/'imported'/'train.py').stat().st_mode&0o777,0o700)
         self.assertFalse((self.code/'imported').is_symlink())

@@ -348,6 +348,7 @@ class SnapshotSync:
     def summary(self, session, canceled=None):
         s=sys.modules[type(self.ops.store).__module__]
         return {**{k:session[k] for k in ('state','project','key','manifestOffset','source','manifestSha256') if k in session},
+                'warnings':self.ops.store.size_warnings(session['totalBytes']),
                 'cancelProtocol':1,'snapshotId':session['session'],'revision':s.digest(session),
                 **({'state':'CANCELED','preservesBytes':True} if canceled is not None else {})}
 
@@ -451,7 +452,7 @@ class SnapshotSync:
                 if not isinstance(manifest,dict) or set(manifest)!={'schema','directories','files'}: raise ValueError('Invalid code manifest')
                 plain={'schema':manifest['schema'],'directories':manifest['directories'],'files':[]}
                 for file in manifest['files']:
-                    if set(file)!={'path','size','sha256','executable'} or type(file['executable'])!=bool or file['size']>4*1024**3: raise ValueError('Invalid code file')
+                    if set(file)!={'path','size','sha256','executable'} or type(file['executable'])!=bool or type(file['size'])!=int or not 0<=file['size']<=self.ops.store.MAX_BYTES: raise ValueError('Invalid code file')
                     plain['files'].append({k:file[k] for k in ('path','size','sha256')})
                 normalized=self.d._manifest(plain)
                 if sum(f['size'] for f in normalized['files'])!=session['totalBytes'] or len(normalized['files'])+len(normalized['directories'])!=session['entries']: raise ValueError('Code manifest totals mismatch')
@@ -502,8 +503,8 @@ class SnapshotSync:
     def begin(self,args):
         user,project=self.ops.identity(args)
         for name in ('manifestBytes','totalBytes','entries'):
-            if type(args.get(name))!=int or args[name]<0: raise ValueError('Invalid code sync totals')
-        if not 1<=args['manifestBytes']<=48*CHUNK or args['entries']>self.ops.store.max_entries or args['totalBytes']>self.ops.store.max_bytes:
+            if type(args.get(name))!=int or not 0<=args[name]<=self.ops.store.MAX_BYTES: raise ValueError('Invalid code sync totals')
+        if not 1<=args['manifestBytes']<=48*CHUNK or args['entries']>self.ops.store.max_entries:
             raise ValueError('Code sync exceeds project limits')
         if not isinstance(args.get('manifestSha256'),str) or not HASH.fullmatch(args['manifestSha256']): raise ValueError('Invalid code manifest checksum')
         validate_source(args.get('source'))

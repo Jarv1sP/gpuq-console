@@ -32,6 +32,11 @@ try{
     if(operation==='datasets.capacity')return {filesystemBytes:1024**4,availableBytes:512*1024**3,reserveBytes:10*1024**3,usableBytes:502*1024**3,guarded:true};
     if(operation==='datasets.list')return {datasets:host===machine?[upload,workspace].map(dataset=>({dataset,
       ownerIds:[owner.id],versions:[{version,state:'READY',files:12,bytes:128*1024**2,canPrepare:false}]})):[]};
+    if(operation==='storage.cache-action.capabilities'){
+      assert.equal(host,machine);
+      assert.deepEqual(args,{userId:owner.id,hostAdmin:false,dataset:upload,version},'Capabilities use the current content owner, never metadata administrator or browse-only');
+      return {protocol:0,prepare:false,release:false,transfer:false,releaseCancel:false};
+    }
     throw Error('Unexpected synthetic node operation '+operation);
   };
   ({server,service}=await createPortalServer({database:join(dir,'db'),bootstrap,origin,secure:false,statusPath,bridge}));
@@ -57,7 +62,26 @@ try{
     await page.locator('#login-form [name=password]').fill(password);
     await page.locator('#login-form [type=submit]').click();
     await page.locator('#login-dialog').waitFor({state:'hidden'});
+    const catalogRead=page.waitForResponse(response=>response.url().endsWith('/api/call')&&
+      response.request().postDataJSON()?.operation==='datasets.catalog'&&response.status()===200);
     await page.locator('[data-nav=datasets]').click();
+    await catalogRead;
+    if(username==='browse-only'){
+      await page.locator('#dataset-catalog .v3-empty').waitFor({state:'visible'});
+      for(const width of [1440,390,320]){
+        await page.setViewportSize({width,height:width===1440?1000:844});
+        assert.equal(await page.locator('[data-v3-select]').count(),0,'No owner/content grant: another account’s datasets stay out of the readable main view');
+        assert.equal(await page.locator('#warehouse-inspector h2').count(),0);
+        assert.equal(await page.locator('.v3-edit,[data-use-dataset]').count(),0,'No edit or train control for another owner');
+        const contents=await page.locator('#page-datasets').textContent();
+        assert.equal(contents.includes(upload)||contents.includes(workspace),false,'No foreign immutable dataset IDs are rendered');
+        assert.equal(await page.locator('#warehouse-page-actions [data-v3-upload]').isDisabled(),true,'Zero machine allowance cannot upload');
+        const geometry=await inspectGeometry(page,{roots:['#page-datasets'],controls:'.v3-row,.v3-copy,.v3-back,.v3-edit',largeTargets:'.v3-row'});
+        assert.deepEqual(geometry.failures,[],username+' '+width+' geometry');
+        await page.screenshot({path:join(screenshots,username+'-'+width+'.png'),fullPage:true,animations:'disabled'});scenes++;
+      }
+      await page.close();continue;
+    }
     const first=page.locator('[data-v3-select="'+upload+'"]');
     await first.waitFor({state:'visible'});
     assert.equal(await page.locator('[data-v3-select]').count(),2,'Equal display names retain distinct immutable datasets');
@@ -95,7 +119,10 @@ try{
     await page.close();
   }
   assert.equal(service.store.jobs.length,0,'Browsing and label edits submit no GPU task');
-  assert.ok(calls.every(row=>['projects.list','transfers.capabilities','datasets.capacity','datasets.list'].includes(row.operation)),'Nodes receive reads only');
+  assert.ok(calls.every(row=>['projects.list','transfers.capabilities','datasets.capacity','datasets.list','storage.cache-action.capabilities'].includes(row.operation)),'Nodes receive reads only');
+  const capabilityReads=calls.filter(row=>row.operation==='storage.cache-action.capabilities');
+  assert.ok(capabilityReads.length>0,'Readable owner checks the real cache capability without starting an operation');
+  for(const row of capabilityReads){assert.equal(row.host,machine);assert.deepEqual(row.args,{userId:owner.id,hostAdmin:false,dataset:upload,version});}
   assert.deepEqual(errors,[]);assert.deepEqual(blocked,[]);
   console.log('DATASET HUMAN NAMES UI PASS: '+scenes+' native 1440/390/320 role scenarios; readable defaults, exact copied IDs/commands, independent names, unchanged owner/use gates, keyboard and geometry.');
 }finally{

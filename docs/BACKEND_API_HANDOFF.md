@@ -201,7 +201,7 @@ ProjectOps 只认可绑定完整原收据摘要及快照 inode 的证明；单�
 
 项目 `files.put` 的固定身份由账号、项目、路径、总长度、SHA256、uploadId 共同绑定。中间块重复发送同 offset/bytes 不会追加；最终提交保留完成回执，查询和原最终块恢复会核验目标内容及身份。已提交的目标被他人编辑或替换会拒绝恢复，不回滚或覆盖新内容。rename 已完成但最终回执尚未写入时，保留的 COMMITTING 意图用于核验结果，此时状态为 `COMPLETE,completionPending:true`；客户端须保持原 ID，在 `offset=totalSize` 发送空的 final 块收尾后才可发布，查询本身不写入。不能仅凭项目旧 READY 版本推断这次上传成功。
 
-客户端先查状态，再继续原上传；遇未知 ACK 最多进行三轮有界恢复，且每轮先查询已确认偏移，不换 uploadId 或路径。旧格式未完成记录没有目标变化围栏，同内容返回 `legacy:true,resumable:false`，不同内容返回 `CONFLICT`，需人工核对，不自动清理或从零重开。传统非项目 `files.put` 不增加重放。完成后的恢复只校验目标并收尾回执，不再次 rename；尚未提交的首次上传／续传仍按显式 push 的替换语义执行，上传期间禁止同路径并发终端编辑，不能把平台锁或 stat 检查称为对外部写入的原子 CAS。单文件上限仍为 4 GiB，完成状态的完整 hash 核验可能占用一次文件读取时间；超时只是未确认，不表示文件不存在。
+客户端先查状态，再继续原上传；遇未知 ACK 最多进行三轮有界恢复，且每轮先查询已确认偏移，不换 uploadId 或路径。旧格式未完成记录没有目标变化围栏，同内容返回 `legacy:true,resumable:false`，不同内容返回 `CONFLICT`，需人工核对，不自动清理或从零重开。传统非项目 `files.put` 不增加重放。完成后的恢复只校验目标并收尾回执，不再次 rename；尚未提交的首次上传／续传仍按显式 push 的替换语义执行，上传期间禁止同路径并发终端编辑，不能把平台锁或 stat 检查称为对外部写入的原子 CAS。配套新版不再以单文件 4 GiB 拒绝；超过该阈值只返回非阻断警告。完成状态的完整 hash 核验可能占用一次文件读取时间；超时只是未确认，不表示文件不存在。
 
 CLI `gpuctl push-status LOCAL [REMOTE] --project PROJECT --machine MACHINE --json` 只读；`gpuctl push` 能恢复同内容的已确认上传。此功能不改变项目字节当前经门户中转的路径，也不冒称项目包走了数据集直传。
 
@@ -316,6 +316,16 @@ ID/revision 核对。维护状态仍保持；物理原件、副本、租约与 p
 
 前端按账号、机器、物理数据集名及完整版本持久保存操作身份；回包丢失后只读核对原 `pinId`，不重新生成 UUID。节点未提供精确能力或查询未知时禁用相应写操作，总 `pinCount` 不是本人标记的证明。预算查询只在数据集页展开或明确刷新时发起，不随全站状态刷新轮询。
 
+## 项目容量警告（需 CLI 与节点配套发布）
+
+项目发布、本地导入和代码同步取消固定 50 GiB 字节配额，单文件上传／Git 同步取消 4 GiB 配额，固定 OCI 镜像及 portable bundle 取消 100 GiB 镜像配额。所有字节总量／偏移仍须是 0–`Number.MAX_SAFE_INTEGER` 的精确整数；这只是协议数字边界，不是可分配容量。条目数量、清单大小、片段大小、磁盘真实余量、已配置的内核配额、挂载／所有权／来源身份和 SHA256 检查保留；不因超出警告而换 key、迁移权重到数据集、降低校验或重放终端。
+
+- `projects.publish` 的 READY 结果、`projects.local-import.status`（扫描总量已知后）、`projects.sync.*` 汇总和 `projects.copy.status`（固定 import 载荷总量已知后）提供 `warnings`。超过默认 50 GiB 返回 `{code:"LARGE_PROJECT",bytes,warningBytes,blocking:false}`；未超量为 `[]`。本地导入的 bytes 包含既有草稿加新复制字节，不表示 HOME／全部历史版本或整个磁盘用量。
+- 项目 `files.put`／`files.upload.status` 按固定 `totalSize` 提供同形状的 `LARGE_FILE`，默认警告阈值 4 GiB。CLI `push` 在完整散列前也打印该警告，仍查询原上传并验证完整回执。警告不说明完成、剩余空间充足或有权写入。
+- 后端字节警告不能解除旧网页 100 MiB 文件选择限制；网页入口须由前端配套。现有可选内核 byte/inode 硬配额不在此源码改动中自动修改，实际配置由部署维护者核对。未启用配额仍不等于无限物理空间。
+
+新的内容版本仍复制代码／权重到独立不可变 release；相同内容摘要复用既有 release，不自动删除旧版本，未新增跨版本去重。预留空间检查据实际复制字节判定。不得以容量限制已取消推断旧归档可删除。
+
 ## 云端文件：服务器文件，不是电脑上传
 
 `cloud.files.*` 处理选定节点上当前用户的个人数据文件；成员不会得到后台云账号、CD2 令牌或私人云盘浏览权限。
@@ -371,3 +381,13 @@ DELETED 只覆盖当前逻辑版本及固定授权依赖；其他名称下的副
 版本删除的源撤销只写 `AuthorityStore` 的永久 grant 撤销记录，目标版本围栏不等于外部 `StorageRetirement.target` 的 installed-authority 墓碑。因此目标可以继续只读核对固定本地 receipt、完成 commit 和历史 status，但源的 guard/manifest/get 永久拒绝旧 token。已有 installed-authority 墓碑依然拒绝本地投影，本接口不绕过或删改它；源恢复也不清除旧 grant 撤销记录。
 
 外部替代退役不被重写：其锁、权限、永久 reference/grant fence 和 API 契约原样保留。本功能仅处理没有替代的版本删除；外部严格完整替代证明只是普通注销“不是最后一份”的实际可重建依据，并在日志单独标为“外部替代退役”。来源不明单 owner 仅管理员。保留期间计费不因目录移动释放；到期清理仅接原本明确启用的 storage 收集服务，本 PR 不开 timer、不部署节点。前端由后续 m4 接口整合。
+
+### 缺失缓存父目录的目录展示
+
+`datasets.list` 对已通过登记与当前 ACL 校验、但缺少必需 READY/staging 父目录的固定版本返回
+`state:"UNKNOWN",canPrepare:false,deletionBlocked:true,errorCode:"CACHE_METADATA_INCOMPLETE"`
+和固定错误提示。其他健康版本继续返回；未知行没有供后台状态使用的可信快照，
+不会加入恢复／删除权限或变成 READY。不会由列表重建父目录。此展示处理只捕获
+专门的父目录缺失错误；损坏登记、权限撤销、unsafe link 和 I/O 错误保持原拒绝。
+`status/prepare/lease/unregister` 与一般目录存在检查不使用这个展示降级，
+缺父目录仍拒绝，不能把 UNKNOWN 当作安全不存在或准备／删除授权。

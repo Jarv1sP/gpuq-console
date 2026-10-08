@@ -930,7 +930,9 @@ class OCITests(unittest.TestCase):
         with patch.object(o.platform,'machine',return_value='x86_64'):
             value=m.portable_image('vision',receipt)
             self.assertEqual(value['architecture'],'amd64');self.assertEqual(value['unpackedBytes'],123)
-            for key,bad in [('Architecture','arm64'),('Os','windows'),('Id','sha256:'+'c'*64),('Size',101*1024**3)]:
+            m.run.return_value=json.dumps([{**image,'Size':101*1024**3}])
+            self.assertEqual(m.portable_image('vision',receipt)['unpackedBytes'],101*1024**3)
+            for key,bad in [('Architecture','arm64'),('Os','windows'),('Id','sha256:'+'c'*64),('Size',True),('Size',-1),('Size',2**53)]:
                 m.run.return_value=json.dumps([{**image,key:bad}])
                 with self.assertRaises(ValueError):m.portable_image('vision',receipt)
         self.assertTrue(all(call.args[0]=='image' for call in m.run.call_args_list))
