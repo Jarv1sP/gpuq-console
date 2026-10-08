@@ -717,8 +717,10 @@ export function executionUI(store,refresh,toast){
     }
     if(button.id==='workspace-pull-command'){const job=resultJob();if(!job||!resultFilePath||query('[name=file-path]').value!==resultFilePath)return;navigator.clipboard.writeText(resultPullCommand(job,resultFilePath)).then(()=>toast('CLI 命令已复制。'),()=>toast('复制失败。'));return;}
     if(button.id==='workspace-download')guarded(button,async()=>{
-      const target=fileContext(),path=query('[name=file-path]').value;if(!path||path==='.')throw Error('请填入要下载的文件相对路径。');let offset=0;const chunks=[];
-      while(true){const result=await call('files.get',{...target,path,offset}),bytes=Uint8Array.from(atob(result.data),char=>char.charCodeAt(0));chunks.push(bytes);offset+=bytes.length;if(offset>100*1024*1024)throw Error('超过 100 MiB，请用 CLI 下载大文件。');if(result.eof)break;if(!bytes.length)throw Error('下载没有继续返回数据，请重试。');}
+      const target=fileContext(),path=query('[name=file-path]').value,token=currentToken(),turn=fileReadTurn;if(!path||path==='.')throw Error('请填入要下载的文件相对路径。');let offset=0;const chunks=[];
+      query('#workspace-result').hidden=false;
+      query('#workspace-result').textContent=`正在核对下载 ${path}…`;
+      while(true){const result=await call('files.get',{...target,path,offset});if(token!==currentToken()||turn!==fileReadTurn)return;const bytes=Uint8Array.from(atob(result.data),char=>char.charCodeAt(0));chunks.push(bytes);offset+=bytes.length;query('#workspace-result').textContent=`正在下载 ${path}：${offset} B`;if(offset>100*1024*1024)throw Error('超过 100 MiB，请用 CLI 下载大文件。');if(result.eof)break;if(!bytes.length)throw Error('下载没有继续返回数据，请重试。');}
       const url=URL.createObjectURL(new Blob(chunks)),anchor=document.createElement('a');anchor.href=url;anchor.download=path.split('/').pop();anchor.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
     });
     if(button.dataset.jobPull)guarded(button,async()=>{const job=ownJobs().find(row=>row.id===button.dataset.jobPull);if(!job||!await resultAccess.check(job,true))throw Error('任务完成状态未确认，请核验完成后再试。');if(store.principal?.userId!==job.userId)return;await diagnostics.openLogs(job.id,'output');});
