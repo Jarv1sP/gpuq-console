@@ -52,7 +52,8 @@ test('authenticated HTTP overview routes compact metadata for zero-quota member,
 
 test('overview remains readable in maintenance and bypasses mutation queue; concurrent lane budget still applies',async t=>{
   const f=await fixture(t);
-  await f.call('maintenance.set',{scope:'global',enabled:true,reason:'local read-only fixture'});
+  assert.equal((await f.call('maintenance.set',{scope:'all',revision:0,enabled:true,reason:'local read-only fixture'})).status,200);
+  assert.equal(f.service.maintenanceFor(MACHINES[0].id).reason,'local read-only fixture');
   let release;const original=f.service.tail;f.service.tail=new Promise(resolve=>release=resolve);
   try{
     const response=await Promise.race([f.call('datasets.overview',{},f.member.token),new Promise((_,reject)=>setTimeout(()=>reject(Error('read blocked by mutation tail')),1000))]);
@@ -72,4 +73,17 @@ test('HTTP overview rejects unauthenticated, injected and cross-origin browser c
   assert.equal((await f.post('/api/call',body,null,{Cookie:cookie,Origin:'http://not-trusted.invalid'})).status,403);
   assert.equal(f.calls.length,0);
   assert.equal((await f.post('/api/call',body,null,{Cookie:cookie,Origin:f.origin})).status,200);
+});
+
+test('HTTP overview responds within five seconds when a node catalog and capacity both hang',async t=>{
+  const f=await fixture(t),bridge=f.service.bridge,offline=MACHINES.at(-1).id;
+  f.service.bridge=(machine,operation,args)=>machine===offline?new Promise(()=>{}):bridge(machine,operation,args);
+  const started=performance.now(),response=await f.call('datasets.overview',{},f.member.token);
+  const elapsed=performance.now()-started;
+  assert.equal(response.status,200);assert.ok(elapsed<5000,`overview took ${elapsed}ms`);
+  const value=response.data.result;
+  assert.equal(value.partial,true);
+  assert.equal(value.caches.find(row=>row.machine===offline).state,'UNKNOWN');
+  assert.equal(value.caches.find(row=>row.machine===offline).reason,'timeout');
+  assert.ok(value.caches.filter(row=>row.machine!==offline).every(row=>row.state==='READY'&&row.volume.totalBytes===1000));
 });

@@ -1,12 +1,15 @@
 import {MACHINES} from './dist/model.js';
 import {datasetCatalogCall} from './dataset-catalog.mjs';
 
+export const STORAGE_OVERVIEW_TIMEOUT_MS=4000;
+export const STORAGE_OVERVIEW_TTL_MS=60000;
 const fail=(message,status=400)=>{throw Object.assign(Error(message),{status});};
 const byte=value=>Number.isSafeInteger(value)&&value>=0?value:null;
 const timestamp=value=>typeof value==='string'&&/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,3})?Z$/.test(value)&&Number.isFinite(Date.parse(value))?value:null;
-// Retain only observation times across a failed poll; never stale capacities.
-// Node project observations are separately persisted in their bounded cache.
+// Preserve real collection times; successful capacity snapshots expire after
+// sixty seconds and never acquire a new timestamp on a cache hit.
 const observations=new WeakMap();
+const capacities=new WeakMap();
 function lastCollected(service,key,value){
   let times=observations.get(service);if(!times){times=new Map();observations.set(service,times);}
   if(value!==null&&(!times.has(key)||Date.parse(value)>Date.parse(times.get(key))))times.set(key,value);
@@ -30,6 +33,63 @@ function volumeView(machine,value){
   return {id:typeof value.volumeDeviceId==='string'&&/^[a-f0-9]{64}$/.test(value.volumeDeviceId)?machine+':'+value.volumeDeviceId:null,
     state:'READY',checkedAt:timestamp(value.checkedAt),collectedAt:timestamp(value.collectedAt)??timestamp(value.checkedAt),totalBytes,usedBytes,availableBytes,reserveBytes,usableBytes,
     readOnly:typeof value.readOnly==='boolean'?value.readOnly:null,guarded:value.guarded===true};
+}
+
+function capacityView(service,machine,value){
+  const versioned=value?.storageOverview?.protocol==='dataset-storage-node-v1',facts=versioned?value.storageOverview:null;
+  const volume=volumeView(machine,versioned?facts.cache?.volume:value);
+  volume.collectedAt=lastCollected(service,machine+':cache',volume.collectedAt);
+  const budgetBytes=byte(versioned?facts.cache?.budgetBytes:value?.datasetBudgetBytes);
+  const projectCollectedAt=lastCollected(service,machine+':projects',timestamp(facts?.cache?.projectCollectedAt));
+  const projectUsageComplete=facts?.cache?.projectUsageComplete===true&&byte(facts.cache.projectBytes)!==null&&timestamp(facts.cache.projectCollectedAt)!==null;
+  const projectBytes=projectUsageComplete?facts.cache.projectBytes:null;
+  let warehouse=null;
+  if(versioned&&facts.warehouse!==null){
+    const candidate=volumeView(machine,facts.warehouse?.volume);
+    candidate.collectedAt=lastCollected(service,machine+':warehouse',candidate.collectedAt);
+    warehouse={machine,state:facts.warehouse?.state==='READY'&&candidate.state==='READY'?'READY':'UNAVAILABLE',volume:candidate};
+  }
+  return {machine,state:volume.state==='READY'?'READY':'UNKNOWN',volume,budgetBytes,projectBytes,projectUsageComplete,projectCollectedAt,warehouse,warehouseKnown:versioned,
+    fileListCapability:value?.datasetFileList===1&&volume.state==='READY'};
+}
+
+function unknownCapacity(service,machine){
+  return {machine,state:'UNKNOWN',reason:'timeout',volume:{...volumeView(machine,null),collectedAt:lastCollected(service,machine+':cache',null)},budgetBytes:null,
+    projectBytes:null,projectUsageComplete:false,projectCollectedAt:lastCollected(service,machine+':projects',null),warehouse:null,warehouseKnown:false};
+}
+
+function readCapacity(service,machine){
+  let nodes=capacities.get(service);if(!nodes){nodes=new Map();capacities.set(service,nodes);}
+  let record=nodes.get(machine);
+  if(record?.expires>Date.now())return Promise.resolve(record.value);
+  if(record?.pending)return record.pending;
+  record={value:null,expires:0,pending:null};nodes.set(machine,record);
+  let timer;
+  // This literal service read is metadata-only; cached facts never grant ACLs.
+  const work=Promise.resolve().then(()=>service.bridge(machine,'datasets.capacity',{userId:'builtin-admin',hostAdmin:true}))
+    .then(value=>capacityView(service,machine,value)).then(value=>{
+      if(value.state==='READY'){record.value=value;record.expires=Date.now()+STORAGE_OVERVIEW_TTL_MS;}
+      return value;
+    });
+  const deadline=new Promise(resolve=>{timer=setTimeout(()=>resolve(unknownCapacity(service,machine)),STORAGE_OVERVIEW_TIMEOUT_MS);});
+  record.pending=Promise.race([work,deadline]).catch(()=>unknownCapacity(service,machine)).finally(()=>clearTimeout(timer));
+  // A timed-out SSH read keeps its lane until it ends; refresh cannot pile up
+  // copies of the same hung request. A late successful reply may seed the cache.
+  Promise.allSettled([work,record.pending]).then(()=>{record.pending=null;});
+  return record.pending;
+}
+
+function catalogWithinDeadline(service){
+  const view=Object.create(service),deadline=Date.now()+STORAGE_OVERVIEW_TIMEOUT_MS;
+  view.bridge=async(machine,operation,args)=>{
+    const remaining=deadline-Date.now();
+    if(remaining<=0)throw Error('timeout');
+    let timer;
+    try{return await Promise.race([Promise.resolve().then(()=>service.bridge(machine,operation,args)),new Promise((_,reject)=>{
+      timer=setTimeout(()=>reject(Error('timeout')),remaining);
+    })]);}finally{clearTimeout(timer);}
+  };
+  return view;
 }
 
 function warning(machine,code){return {machine,code};}
@@ -57,31 +117,14 @@ export async function datasetStorageOverviewCall(service,principal,args){
     let current;try{current=service.store.get(principal.userId);}catch{}
     if(service.closing||current?.enabled!==true||JSON.stringify(current)!==policy)fail('账号授权已改变，请刷新后重试。',403);
   };
-  // Catalog's existing metadata-only service read preserves exact member ACLs.
-  const catalog=await datasetCatalogCall(service,principal,'datasets.catalog',{},{refreshRemovalExclusions:false});
-  checkPolicy();
-  const nodes=await Promise.all(MACHINES.map(async({id:machine})=>{
-    try{
-      // Confinement to a fixed, literal capacity read, never a file operation.
-      const value=await service.bridge(machine,'datasets.capacity',{userId:'builtin-admin',hostAdmin:true});
-      const versioned=value?.storageOverview?.protocol==='dataset-storage-node-v1',facts=versioned?value.storageOverview:null;
-      const volume=volumeView(machine,versioned?facts.cache?.volume:value);
-      volume.collectedAt=lastCollected(service,machine+':cache',volume.collectedAt);
-      const budgetBytes=byte(versioned?facts.cache?.budgetBytes:value?.datasetBudgetBytes);
-      const projectCollectedAt=lastCollected(service,machine+':projects',timestamp(facts?.cache?.projectCollectedAt));
-      const projectUsageComplete=facts?.cache?.projectUsageComplete===true&&byte(facts.cache.projectBytes)!==null&&timestamp(facts.cache.projectCollectedAt)!==null;
-      const projectBytes=projectUsageComplete?facts.cache.projectBytes:null;
-      let warehouse=null;
-      if(versioned&&facts.warehouse!==null){
-        const candidate=volumeView(machine,facts.warehouse?.volume);
-        candidate.collectedAt=lastCollected(service,machine+':warehouse',candidate.collectedAt);
-        warehouse={machine,state:facts.warehouse?.state==='READY'&&candidate.state==='READY'?'READY':'UNAVAILABLE',volume:candidate};
-      }
-      return {machine,state:volume.state==='READY'?'READY':'UNKNOWN',volume,budgetBytes,projectBytes,projectUsageComplete,projectCollectedAt,warehouse,warehouseKnown:versioned,
-        fileListCapability:value?.datasetFileList===1&&volume.state==='READY'};
-    }catch{return {machine,state:'UNAVAILABLE',volume:{...volumeView(machine,null),collectedAt:lastCollected(service,machine+':cache',null)},budgetBytes:null,
-      projectBytes:null,projectUsageComplete:false,projectCollectedAt:lastCollected(service,machine+':projects',null),warehouse:null,warehouseKnown:false};}
-  }));
+  // Independent fixed metadata reads share one elapsed window. Waiting for
+  // every catalog before starting capacities doubles an offline node's bridge
+  // deadline and makes a healthy warehouse disappear behind client timeouts.
+  // Neither branch grants access; both revalidate the actor before projection.
+  const [catalog,nodes]=await Promise.all([
+    datasetCatalogCall(catalogWithinDeadline(service),principal,'datasets.catalog',{},{refreshRemovalExclusions:false}),
+    Promise.all(MACHINES.map(({id})=>readCapacity(service,id)))
+  ]);
   checkPolicy();
   const usage=new Map(nodes.map(node=>[node.machine,{sizes:[],versions:new Set(),complete:catalog.machines.find(row=>row.machine===node.machine)?.state==='ok'}]));
   const originals=new Map(nodes.filter(node=>node.warehouse).map(node=>[node.machine,{sizes:[],datasets:new Set(),versions:new Set(),complete:catalog.machines.find(row=>row.machine===node.machine)?.state==='ok'}]));
@@ -113,7 +156,7 @@ export async function datasetStorageOverviewCall(service,principal,args){
   });
   const caches=nodes.map(node=>{
     const counts=usage.get(node.machine),complete=counts.complete&&counts.sizes.every(value=>value!==null);
-    return {machine:node.machine,state:node.state,volume:node.volume,readyContentBytes:complete?sum(counts.sizes):null,
+    return {machine:node.machine,state:node.state,...(node.reason?{reason:node.reason}:{}),volume:node.volume,readyContentBytes:complete?sum(counts.sizes):null,
       readyVersionCount:counts.complete?counts.versions.size:null,budgetBytes:node.budgetBytes,reserveBytes:node.volume.reserveBytes,usageComplete:complete,
       projectBytes:node.projectBytes,projectUsageComplete:node.projectUsageComplete,projectCollectedAt:node.projectCollectedAt};
   });
