@@ -35,9 +35,12 @@ export async function selectMachine(service,user,request,priorityCapable,usage){
     return !(request.explicit?.mode&&request.explicit.mode!=='queue'&&!q.capabilities?.includes('preempt-opt-in-only-v1'));
   });
   if(!eligible.length)fail('没有已授权、健康且满足卡数、显存和调度能力的候选服务器。');
+  let sourceUnconfirmed=false;
   const sources=(await Promise.all(authorized.map(async m=>{
-    try{const probe=await service.projectCopyProbe(user.id,m.id,request.project);return readyProbe(probe,request.project)?{machine:m.id,probe}:null;}catch{return null;}
+    try{const probe=await service.projectCopyProbe(user.id,m.id,request.project);return readyProbe(probe,request.project)?{machine:m.id,probe}:null;}
+    catch(error){if(error.status>=500)sourceUnconfirmed=true;return null;}
   }))).filter(Boolean);check();
+  if(!sources.length&&sourceUnconfirmed)fail('项目版本查询暂未确认；未提交训练，请稍后重试。',503);
   if(!sources.length)fail('未找到可迁移的 READY 个人容器项目版本；请先发布项目。');
   const source=sources[0];
   if(sources.some(s=>s.probe.architecture!==source.probe.architecture||s.probe.image!==source.probe.image))fail('同一项目版本的镜像或架构信息不一致；请管理员核对，未提交训练。');

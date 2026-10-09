@@ -90,6 +90,10 @@ class TerminalHelper(unittest.TestCase):
         self.offset = result['offset']
         return base64.b64decode(result['data']), result
 
+    def test_terminal_import_does_not_add_bytecode_to_immutable_runtime(self):
+        self.assertFalse((self.base / '__pycache__').exists(),
+                         'Guard import must preserve the exact immutable file manifest')
+
     def test_input_echo_arrives_in_same_exchange_and_is_not_replayed(self):
         echo, result = self.exchange(b'a')
         self.assertEqual(echo, b'61-')

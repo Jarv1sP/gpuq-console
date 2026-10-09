@@ -1,6 +1,7 @@
 #!/usr/bin/python3
 """One private PTY per explicit session; the executor fences its single writer."""
 import base64,fcntl,importlib.util,json,os,pty,select,socket,stat,struct,subprocess,sys,termios,time
+sys.dont_write_bytecode=True  # Keep the immutable runtime free of imported bytecode.
 from pathlib import Path
 ROOT_SHELLS=('/usr/local/libexec/gpuq-console-root-shell','/usr/local/libexec/amax-console-root-shell')
 

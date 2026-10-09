@@ -146,6 +146,9 @@ export function bridgeClient(socketPath){
         const transports={NODE_TRANSPORT_BUSY:[503,'节点连接查询繁忙；请稍后查询原状态。'],NODE_CONNECT_FAILED:[503,'节点连接暂时失败；操作结果未确认，请查询原状态。'],NODE_RESPONSE_TIMEOUT:[504,'节点处理超时；操作结果未确认，请查询原状态。'],NODE_SSH_AUTH_FAILED:[502,'节点 SSH 身份校验失败，请联系管理员；原操作不会自动重派。'],NODE_SSH_HOSTKEY_FAILED:[502,'节点 SSH 主机密钥校验失败，请联系管理员；原操作不会自动重派。'],NODE_RESPONSE_INVALID:[502,'节点响应协议异常；操作结果未确认，请查询原状态。']};
         const known=Object.hasOwn(transports,data.code)?transports[data.code]:null;
         if(known&&data.status===known[0])return finish(Object.assign(Error(known[1]),{status:known[0],code:data.code}));
+        // A fixed training entry can fail before invoking the operation. Its
+        // explicit uncertainty is not proof that a published release is absent.
+        if(data.outcomeUnconfirmed===true)return finish(Object.assign(Error('节点操作结果未确认，请稍后查询原状态；不会自动重试。'),{status:503,code:'EXECUTOR_UNCONFIRMED'}));
         return finish(Error(data.error||'节点操作失败'));
       }
       finish(null,data.result);

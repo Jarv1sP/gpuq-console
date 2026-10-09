@@ -74,3 +74,10 @@ test('real HTTP reports 503 during bridge absence and same host status recovers 
  assert.deepEqual(statuses,[503,200]);assert.equal(result.result.state,'RUNNING');
  assert.equal(calls.length,1);assert.equal(calls[0].operation,'host.status');assert.equal(calls[0].args.id,body.args.id);
 });
+
+
+test('explicit dedicated training uncertainty becomes safe 503 without replay or native error disclosure',async t=>{
+ const calls=[],f=await fixture(t,(socket,request)=>{calls.push(request);socket.end(JSON.stringify({ok:false,error:'Dedicated training exchange unconfirmed PRIVATE path',errorType:'ValueError',outcomeUnconfirmed:true}));});await f.start();
+ await assert.rejects(bridgeClient(f.path)('node','projects.copy.probe',{userId:'u',project:'vision',release:'a'.repeat(64)}),e=>e.status===503&&e.code==='EXECUTOR_UNCONFIRMED'&&!/PRIVATE|ValueError/.test(e.message));
+ assert.equal(calls.length,1);assert.equal(calls[0].operation,'projects.copy.probe');
+});
