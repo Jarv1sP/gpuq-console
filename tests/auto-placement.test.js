@@ -334,3 +334,23 @@ test('real SQLite portal persists AUTO identity across reopen and serial concurr
   assert.equal(retried.id,replies[0].result.id);assert.equal(retried.machine,ids[1]);assert.equal(retried.state,DATA_PREPARING);assert.equal(f.calls.length,0);
   assert.ok(f.storageCalls.length>0);assert.ok(f.storageCalls.every(call=>['storage.training.plan','datasets.training.status'].includes(call.operation)));
 });
+
+
+test('AUTO does not misreport an unconfirmed project probe as an unpublished release',async()=>{
+  const f=fixture();
+  f.service.projectCopyProbe=async()=>{throw Object.assign(Error('PRIVATE runtime guard details'),{status:503,code:'EXECUTOR_UNCONFIRMED'});};
+  await assert.rejects(executionCall(f.service,principal(f),'jobs.submit',base()),e=>e.status===503&&e.code==='SUBMISSION_REJECTED'&&/未提交训练/.test(e.message)&&!/请先发布|PRIVATE/.test(e.message));
+  assert.equal(f.service.store.jobs.length,0);assert.equal(f.saved.length,0);assert.equal(f.calls.length,0);assert.equal(f.storageCalls.length,0);
+});
+
+test('AUTO retains confirmed absence and can use an exact READY source despite another unavailable probe',async()=>{
+  const absent=fixture();absent.local.clear();
+  await assert.rejects(selectMachine(absent.service,absent.user,normalized(),priorityCapable),e=>e.status===409&&/请先发布项目/.test(e.message));
+  const f=fixture(),probe=f.service.projectCopyProbe;
+  f.service.projectCopyProbe=async(owner,machine,ref)=>{
+    if(machine!==ids[0])throw Object.assign(Error('temporarily unconfirmed'),{status:503});
+    return probe(owner,machine,ref);
+  };
+  const result=await selectMachine(f.service,f.user,normalized(),priorityCapable);
+  assert.equal(result.machine,ids[0]);assert.equal(result.projectPreparation.state,'READY');assert.equal(f.saved.length,0);assert.equal(f.calls.length,0);
+});
