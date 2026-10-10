@@ -164,7 +164,11 @@ test('ordinary-user datasets document campus direct upload without relay recomme
 test('public guide excludes cloud and link-import workflows until they are ready for members', () => {
   assert.doesNotMatch(guide, /云盘|云端副本|阿里云|CD2|分享链接|下载链接|链接导入|HTTPS.*直链/);
   assert.doesNotMatch(guide, /gpuctl data (?:cloud|imports?)(?:\s|-|$)/m);
-  assert.match(guide, /已有文件或外接硬盘中的大数据，联系管理员从原位置核对、整理并入仓库/);
+  assert.match(guide, /已有文件或外接硬盘中的大数据，先核对是否已有共享只读路径/);
+  assert.match(guide, /能够直接读取就共用原目录，不必再入库/);
+  assert.match(guide, /需要固定快照或跨机副本时，联系管理员从原位置整理并入仓库/);
+  assert.match(guide, /多个任务共用原目录，不用上传、发布或准备另一份副本/);
+  assert.match(guide, /gpuctl run -g 1 -- python train.py --data \/datasets\/imagenet/);
   assert.match(guide, /不必先拉回自己的电脑/);
   assert.match(guide, /不会自动解压/);
   assert.match(guide, /不要把训练缓存当作长期数据仓库/);
@@ -252,7 +256,9 @@ test('guide explains quotas, interruption and failure evidence without promising
 });
 
 test('single warehouse intake separates complete warehouse data from prepared training cache',()=>{
-  assert.match(guide,/已有文件或外接硬盘中的大数据，联系管理员从原位置核对、整理并入仓库/);
+  assert.match(guide,/已有文件或外接硬盘中的大数据，先核对是否已有共享只读路径/);
+  assert.match(guide,/能够直接读取就共用原目录，不必再入库/);
+  assert.match(guide,/需要固定快照或跨机副本时，联系管理员从原位置整理并入仓库/);
   assert.match(guide,/先确认内容、解压大小和剩余空间，再登记完整数据集/);
   assert.match(guide,/不会自动解压/);
   assert.match(guide,/不要把训练缓存当作长期数据仓库/);
