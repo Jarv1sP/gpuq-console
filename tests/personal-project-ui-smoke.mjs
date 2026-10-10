@@ -204,8 +204,9 @@ try{
       assert.equal(await layout.locator('[name=workspace-machine]').getAttribute('title'),node.id);
       assert.equal(await layout.locator('#shared-data-note').isVisible(),true);
       assert.match(await layout.locator('#shared-data-note').textContent(),/默认只读.*\/datasets\/imagenet/);
-      await layout.locator('#shared-data-note').scrollIntoViewIfNeeded();
-      const sharedGeometry=await inspectOperationalGeometry(layout,{roots:['.personal-terminal'],controls:'button',viewportContainment:['#shared-data-note']});
+      await layout.locator('#shared-data-note').evaluate(node=>node.scrollIntoView({block:'center',behavior:'instant'}));
+      await layout.evaluate(()=>new Promise(resolve=>requestAnimationFrame(resolve)));
+      const sharedGeometry=await inspectOperationalGeometry(layout,{roots:['.personal-terminal'],controls:'button',focusedTargets:['#shared-data-note'],viewportContainment:[{child:'#shared-data-note',parent:'.personal-terminal'}]});
       assert.deepEqual(sharedGeometry.failures,[],JSON.stringify({role,width,sharedGeometry}));
       await layout.screenshot({path:join(shots,`shared-data-${role}-${width}-${node.id}.png`)});
       assert.ok(await layout.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'Shared directory path does not overflow');
