@@ -1,5 +1,6 @@
 """Disposable dual-root contracts, no real nodes/configurations/datasets."""
 import contextlib
+import ast
 import importlib.util
 import hashlib
 import json
@@ -27,6 +28,30 @@ ADMIN=D.Principal('demo-user-3',True);OWNER=D.Principal('demo-user-3')
 
 
 class WarehouseTests(unittest.TestCase):
+    def management(self, operation, args):
+        # Exercise the actual executor routing function against both real
+        # temporary stores, without loading a production node configuration.
+        source=ast.parse((DEPLOY/'node-executor.py').read_text())
+        function=next(n for n in source.body if isinstance(n,ast.FunctionDef) and n.name=='storage_management')
+        namespace=dict(dataset_cache=lambda:(D,self.hot),
+            dataset_actor=lambda module,args:module.Principal(args['userId'],args['hostAdmin']),
+            storage_warehouse=lambda:self.w,storage_node=lambda:self.storage)
+        exec(compile(ast.Module(body=[function],type_ignores=[]),'node-executor.py','exec'),namespace)
+        return namespace['storage_management'](operation,args)
+
+    def test_storage_status_reads_logical_original_without_cache_preparation(self):
+        result=self.management('datasets.storage.status',dict(userId=ADMIN.user_id,hostAdmin=True,dataset='tiny',version=self.version))
+        self.assertEqual(result['version']['dataset'],'tiny')
+        self.assertEqual(result['version']['version'],self.version)
+        self.assertEqual(result['version']['state'],'READY')
+        self.assertEqual(result['version']['role'],'protected')
+        self.assertFalse((self.hot._paths(self.w.cache_name('tiny'))['.registry']/'dataset.json').exists())
+
+    def test_storage_status_does_not_fallback_for_wrong_version_or_nonadmin(self):
+        for change in ({'version':'f'*64},{'hostAdmin':False},{'op':'plan'}):
+            with self.assertRaises((ValueError,D.CacheError,FileNotFoundError)):
+                self.management('datasets.storage.status',dict(userId=ADMIN.user_id,hostAdmin=True,dataset='tiny',version=self.version)|change)
+
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.root=Path(self.tmp.name).resolve()
         (self.root/'hdd').mkdir(mode=0o700)

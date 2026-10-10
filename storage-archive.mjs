@@ -518,11 +518,24 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
     row.eventAcknowledged=true;save(row);
   }
 
+  // An ingest already on the warehouse node only observes existing protection
+  // and acknowledges its outbox. It creates no copy, grant or sealing worker.
+  const originalObservation=row=>row.kind==='ingest'&&row.machine===row.sourceMachine&&
+    row.dataset===row.sourceDataset&&row.transferId===null&&['PROVISIONING','ARCHIVED'].includes(row.phase);
+  async function confirmOriginal(row,snapshot){
+    if(row.phase!=='ARCHIVED'){
+      const result=await call(row,snapshot,row.sourceMachine,'storage.archive.original',{userId:row.owner,dataset:row.dataset,version:row.version});
+      if(result?.protected!==true||result.dataset!==row.dataset||result.version!==row.version)fail('Archive original is not protected');
+      row.phase='ARCHIVED';delete row.error;save(row);
+    }
+    await acknowledge(row,snapshot);releaseLane(row);
+  }
   async function advance(row){
     if(service.maintenanceFor?.(row.machine)||service.maintenanceFor?.(row.sourceMachine))return;
     if(row.nextCheckAt>clock())return;
     if(row.phase==='FAILED'||row.phase==='BLOCKED'||row.nextCheckAt>clock())return;
     const snapshot=fence(row);
+    if(originalObservation(row)){await confirmOriginal(row,snapshot);return;}
     if(!holdLane(row))return;
     if(row.phase==='ARCHIVED'){await acknowledge(row,snapshot);releaseLane(row);return;}
     if(row.phase==='QUEUED'||row.phase==='COPYING'){
@@ -561,9 +574,7 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
       row.enrollment.sourceRegistration=proof.registration;save(row);
     }
     if(row.machine===row.sourceMachine){
-      const result=await call(row,snapshot,row.sourceMachine,'storage.archive.original',{userId:row.owner,dataset:row.dataset,version:row.version});
-      if(result?.protected!==true||result.dataset!==row.dataset||result.version!==row.version)fail('Archive original is not protected');
-      row.phase='ARCHIVED';delete row.error;save(row);await acknowledge(row,snapshot);releaseLane(row);return;
+      await confirmOriginal(row,snapshot);return;
     }
     const request={opId:row.grantId,userId:row.owner,source:{dataset:row.sourceDataset,version:row.version},targetMachine:row.machine,
       ...(row.enrollment?{expectedRegistration:row.enrollment.sourceRegistration}:{}),...(row.retryRequested?{retry:true}:{})};
@@ -608,7 +619,14 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
       // An unknown old-policy lane stays held for explicit reconciliation. Do
       // not dispatch or rewrite that journal merely because defaults changed.
       const pending=held?(heldRow&&currentPolicy(heldRow)?[heldRow]:[]):rows().filter(row=>currentPolicy(row)&&!row.retirementIntent&&row.nextCheckAt<=clock()&&(row.phase==='ARCHIVED'&&!row.eventAcknowledged||!['ARCHIVED','FAILED','BLOCKED'].includes(row.phase))).sort((a,b)=>a.updatedAt-b.updatedAt);
-      for(const row of pending.slice(0,1)){
+      const selected=pending.slice(0,1);
+      // One bounded observation may progress even while another job retains
+      // the heavy-copy lane. Never release or rewrite that job's protection.
+      const observation=rows().filter(row=>originalObservation(row)&&currentPolicy(row)&&!row.retirementIntent&&
+        row.nextCheckAt<=clock()&&!(row.phase==='ARCHIVED'&&row.eventAcknowledged)&&!selected.some(value=>value.id===row.id))
+        .sort((a,b)=>a.updatedAt-b.updatedAt)[0];
+      if(observation)selected.push(observation);
+      for(const row of selected){
         try{await advance(row);}
         catch(error){
           if(service.closing)return;

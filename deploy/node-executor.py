@@ -1749,6 +1749,12 @@ def storage_management(operation,args):
     module,_=dataset_cache();actor=dataset_actor(module,args)
     request={k:v for k,v in args.items() if k not in ('userId','hostAdmin')}
     if 'op' in request:raise ValueError('Storage operation cannot be overridden')
+    if operation=='datasets.storage.status' and set(request)=={'dataset','version'}:
+        warehouse=storage_warehouse()
+        if warehouse is not None and warehouse.contains(actor,request['dataset'],request['version']):
+            # A logical HDD registration is not an SSD cache alias. Observe
+            # the exact original root; do not prepare/copy or infer an alias.
+            return warehouse._cold_storage().dispatch(actor,{'op':'status',**request})
     return storage_node().dispatch(actor,{'op':operation.rsplit('.',1)[1],**request})
 
 
