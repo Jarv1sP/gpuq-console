@@ -94,24 +94,34 @@ _LOCK_WAIT = contextvars.ContextVar("dataset_lock_wait", default=None)
 
 
 @contextlib.contextmanager
-def wait_for_locks(*, timeout=30.0, total=120.0, canceled=None):
+def wait_for_locks(*, timeout=30.0, total=120.0, canceled=None, renew_on_progress=False):
     """Trusted worker/read scope: wait for acquisition, never replay mutations.
 
     The total budget counts only time spent contending, not scanning/copying or
     time holding a lock. Nested helpers share it; unrelated request threads do
-    not. No client can supply these bounds through a dataset operation.
+    not. A trusted long-running publisher may renew only after new bytes are
+    durably checkpointed; stalled operations and nested scopes stay bounded.
+    No client can supply these bounds through a dataset operation.
     """
     if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not 0 <= v <= limit
-           for v, limit in ((timeout, 60), (total, 300))) or (canceled is not None and not callable(canceled)):
+           for v, limit in ((timeout, 60), (total, 300))) or (canceled is not None and not callable(canceled)) or type(renew_on_progress) is not bool:
         raise CacheError("invalid dataset lock wait policy")
     if _LOCK_WAIT.get() is not None:
         yield  # A helper must not reset its caller's finite wait budget.
         return
-    token = _LOCK_WAIT.set({"timeout": timeout, "remaining": total, "canceled": canceled})
+    token = _LOCK_WAIT.set({"timeout": timeout, "remaining": total, "canceled": canceled,
+                           **({"progressBudget": total} if renew_on_progress else {})})
     try:
         yield
     finally:
         _LOCK_WAIT.reset(token)
+
+
+def _durable_copy_progress():
+    """Private checkpoint hook, never a retry or a public admission option."""
+    policy = _LOCK_WAIT.get()
+    if policy is not None and "progressBudget" in policy:
+        policy["remaining"] = policy["progressBudget"]
 
 
 class Principal(NamedTuple):
@@ -2247,6 +2257,8 @@ class DatasetCache:
                     if current["remainingBytes"] != remaining:
                         fence = dict(current, remainingBytes=remaining)
                         _write_json(stage / "TRANSFER.json", fence)
+                        if remaining < current["remainingBytes"]:
+                            _durable_copy_progress()
                 batch_bytes = batch_files = 0
                 checked_at = time.monotonic()
 
