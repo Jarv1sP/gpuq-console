@@ -3,7 +3,7 @@ import net from 'node:net';
 import {MACHINES} from './dist/model.js';
 import {taskIdentity,nativeTaskDisplay} from './dist/task-metadata.js';
 import {nativeJobRequest} from './native-task-metadata.mjs';
-import {applyJobFeedback,jobTiming} from './dist/job-progress.js';
+import {applyJobFeedback,jobTiming,projectProgress} from './dist/job-progress.js';
 import {maintainTaskNotes} from './community.mjs';
 import {projectCall,projectReference,validateProjectFile,UUID} from './projects.mjs';
 import {yieldCapable} from './dist/scheduling-policy.js';
@@ -18,29 +18,12 @@ import {installDatasetReplication} from './dataset-replication.mjs';
 import {selectMachine} from './machine-selection.mjs';
 import {resolveTrainingDataset,trainingDatasetCapabilities} from './training-datasets.mjs';
 import {trainingStoragePlan} from './training-storage.mjs';
-import {terminalNativeObservation,unavailableObservation,portalTerminalSnapshot,jobCompletion} from './job-observation.mjs';
+import {requireCampusUpload,rejectWorkspaceRelay,campusUploadReply} from './campus-upload-policy.mjs';
+import {terminalNativeObservation,unavailableObservation,portalTerminalSnapshot,jobCompletion,cacheBusyRecovery,jobOutputReadError} from './job-observation.mjs';
 export {datasetReferences} from './job-submission.mjs';
 
 export const TERMINAL=new Set(['SUCCEEDED','FAILED','CANCELED']);
 export const PRIORITIES=new Set(['idle','normal','high']);
-const DISPLAY_OPERATIONS=new Set(['datasets.overview','datasets.catalog','datasets.capacity','datasets.list','datasets.files.list','files.list','storage.usage.mine','storage.usage.users']);
-const DISPLAY_NODE_OPERATIONS=new Set(['datasets.list','datasets.capacity','datasets.files.list','files.list']);
-const displayServices=new WeakMap();
-export function displayReadService(service,operation){
-  if(!DISPLAY_OPERATIONS.has(operation)||typeof service.displayBridge!=='function')return service;
-  let record=displayServices.get(service);
-  if(!record||record.displayBridge!==service.displayBridge){
-    const view=Object.create(service),displayBridge=service.displayBridge;
-    view.bridge=(machine,nodeOperation,args)=>DISPLAY_NODE_OPERATIONS.has(nodeOperation)
-      ?displayBridge.call(service,machine,nodeOperation,args)
-      :service.bridge(machine,nodeOperation,args);
-    record={view,displayBridge};displayServices.set(service,record);
-  }
-  // Reuse the view so bounded observation caches retain their normal TTL.
-  // Only an explicit display request selects it; mutation dependency reads
-  // remain on the authoritative executor even when their node op is a list.
-  return record.view;
-}
 const fail=(message,status=400,code)=>{throw Object.assign(Error(message),{status,...(code?{code}:{})});};
 export const priorityCapable=host=>host?.reachable===true&&host.gpuq?.connected===true&&Array.isArray(host.gpuq.capabilities)&&host.gpuq.capabilities.includes('priority-policy-v1')&&host.gpuq.capabilities.includes('preempt-idle-only-v1');
 export const priorityRankCapable=host=>priorityCapable(host)&&host.gpuq.capabilities.includes('priority-rank-v1');
@@ -72,6 +55,7 @@ export function schedulerResult(job,result){
   job.priorityMutable=result.priorityMutable===true;
   job.preempted=result.preempted===true;
   applyJobFeedback(job,result);
+  job.progressCheckedAt=job.checkedAt;
   if(TERMINAL.has(job.state))job.finishedAt||=job.checkedAt;
 }
 function persistSchedulerResult(service,job,result){
@@ -120,22 +104,44 @@ async function firstDispatch(service,job){
   });
 }
 export function bridgeClient(socketPath){
-  return (machine,operation,args)=>new Promise((resolve,reject)=>{
-    const socket=net.createConnection(socketPath);let raw='',settled=false;
+  return (machine,operation,args,options={})=>new Promise((resolve,reject)=>{
+    let socket,raw='',settled=false,retries=0,retryTimer,lastErrno=null;
+    // Only trusted read contexts can shorten/cancel a bridge request. Wire args
+    // cannot opt a mutation into replay or change its original 32s deadline.
+    const boundedRead=['datasets.upload.routes','datasets.upload.status','storage.upload.locate'].includes(operation);
+    const signal=boundedRead?options.signal:undefined;
+    const timeoutMs=boundedRead&&Number.isInteger(options.rpcTimeoutMs)?Math.max(1,Math.min(32000,options.rpcTimeoutMs)):32000;
+    const deadline=Date.now()+timeoutMs;
     let timer;
-    const finish=(error,result)=>{if(settled)return;settled=true;clearTimeout(timer);error?reject(error):resolve(result);};
-    const unavailable=()=>Object.assign(Error('节点执行桥暂时不可用；操作结果未确认，请查询原任务状态。'),{status:503,code:'EXECUTOR_UNAVAILABLE'});
+    const finish=(error,result)=>{if(settled)return;settled=true;clearTimeout(timer);clearTimeout(retryTimer);signal?.removeEventListener('abort',abort);error?reject(error):resolve(result);};
+    const abort=()=>{const error=signal.reason||Object.assign(Error('上传查询已取消。'),{status:499,code:'UPLOAD_READ_CANCELLED'});if(socket)socket.destroy(error);else finish(error);};
+    if(signal?.aborted){finish(signal.reason);return;}
+    signal?.addEventListener('abort',abort,{once:true});
+    const unavailable=()=>Object.assign(Error('节点执行桥暂时不可用；操作结果未确认，请查询原任务状态。'+(lastErrno?' ('+lastErrno+')':'')),{status:503,code:'EXECUTOR_UNAVAILABLE',...(lastErrno?{errno:lastErrno}:{})});
     const timeout=()=>Object.assign(Error('节点响应超时；操作结果未确认，请查询原任务状态。'),{status:504,code:'EXECUTOR_TIMEOUT'});
-    // A bridge restart is infrastructure unavailability, not a bad user
-    // request. Never reconnect/replay here: input or a mutation may be sent.
+    // Only an EAGAIN before connect (zero request bytes) is safe to retry.
+    // Refusal, EOF and errors after connect never replay an operation.
     // This is an elapsed deadline, not merely an inactivity timeout: partial
     // bytes cannot keep an abandoned remote query alive indefinitely.
-    timer=setTimeout(()=>socket.destroy(timeout()),32000);
-    socket.setTimeout(32000,()=>socket.destroy(timeout()));
-    socket.on('connect',()=>socket.end(JSON.stringify({machine,operation,args})+'\n'));
-    socket.on('data',part=>{raw+=part;if(Buffer.byteLength(raw)>2_000_000)socket.destroy(Object.assign(Error('节点执行桥响应过大；操作结果未确认。'),{status:502}));});
-    socket.on('error',error=>finish(Number.isInteger(error.status)?error:unavailable()));
-    socket.on('end',()=>{
+    timer=setTimeout(()=>socket?socket.destroy(timeout()):finish(timeout()),timeoutMs);
+    const connect=()=>{
+    if(settled)return;
+    if(Date.now()>=deadline)return finish(timeout());
+    const current=socket=net.createConnection(socketPath);let connected=false;
+    current.setTimeout(Math.max(1,deadline-Date.now()),()=>current.destroy(timeout()));
+    current.on('connect',()=>{connected=true;lastErrno=null;current.end(JSON.stringify({machine,operation,args})+'\n');});
+    current.on('data',part=>{raw+=part;if(Buffer.byteLength(raw)>2_000_000)current.destroy(Object.assign(Error('节点执行桥响应过大；操作结果未确认。'),{status:502}));});
+    current.on('error',error=>{
+      if(settled||socket!==current)return;
+      lastErrno=typeof error.code==='string'&&/^[A-Z0-9_]+$/.test(error.code)?error.code:null;
+      if(error.code==='EAGAIN'&&!connected&&current.bytesWritten===0&&retries<8&&Date.now()<deadline){
+        retries++;socket=null;current.destroy();
+        retryTimer=setTimeout(connect,Math.min(10+Math.floor(Math.random()*71),deadline-Date.now()));
+        return;
+      }
+      finish(Number.isInteger(error.status)?error:unavailable());
+    });
+    current.on('end',()=>{
       if(!raw)return finish(unavailable());
       let data;
       try{data=JSON.parse(raw);if(!data||typeof data!=='object'||Array.isArray(data)||typeof data.ok!=='boolean')throw Error();}
@@ -153,7 +159,9 @@ export function bridgeClient(socketPath){
       }
       finish(null,data.result);
     });
-    socket.on('close',()=>{if(!settled)finish(unavailable());});
+    current.on('close',()=>{if(!settled&&socket===current)finish(unavailable());});
+    };
+    connect();
   });
 }
 export function installExecution(service,bridge){
@@ -236,23 +244,74 @@ export function installExecution(service,bridge){
   if(bridge){service.executionTimer=setInterval(()=>service.reconcile().catch(()=>{}),15000);service.executionTimer.unref();}
 }
 export function usage(jobs,userId,machine){return jobs.filter(j=>j.userId===userId&&!TERMINAL.has(j.state)&&j.state!==DATA_PREPARING&&(!machine||j.machine===machine)).reduce((sum,j)=>sum+j.cards,0);}
-export function publicJob(job,users=[]){const {spec,digest,schedulerPolicy,dataPreparationHold,dispatchPending,trainingStoragePlan:privateStoragePlan,trainingStorageRequest:privateStorageRequest,trainingPreparations:privatePreparations,nativeTaskDisplay:displayCache,...safe}=job;return {...safe,...jobTiming(job),...taskIdentity(job,users),command:spec.argv,
+// Presentation only: never persist these deductions or use them for admission.
+// A node-supplied reason remains authoritative; missing observations are not
+// proof of free cards, a sharing limit, or a new dispatch opportunity.
+export function pendingJobReason(service,job,now=Date.now()){
+  const reported=typeof job.queueReason==='string'&&job.queueReason.trim()?job.queueReason:null;
+  if(!['PENDING','QUEUED','SUBMITTING',DATA_PREPARING].includes(job.state)||job.cancelRequested)return reported;
+  if(reported)return reported;
+  const snapshot=service.gpuq,host=snapshot?.hosts?.find(h=>h.id===job.machine);
+  const observed=Date.parse(snapshot?.checkedAt),age=now-observed;
+  const fresh=snapshot?.stale===false&&Number.isFinite(age)&&age>=-30000&&age<=180000&&host?.reachable===true&&host.gpuq?.connected===true;
+  const machine=MACHINES.find(m=>m.id===job.machine),jobs=service.store.jobs||[];
+  const shared=job.placement?.shared===true||job.spec?.placement?.shared===true;
+  if(fresh&&machine){
+    const native=host.gpuq.jobs||[],occupied=new Set();
+    const nativeReason=native.find(row=>row.id===job.nodeJobId&&row.state==='PENDING')?.state_reason;
+    if(typeof nativeReason==='string'&&nativeReason.trim())return nativeReason.slice(0,400);
+    const add=indices=>{for(const index of indices||[])if(Number.isSafeInteger(index)&&index>=0&&index<machine.cards)occupied.add(index);};
+    for(const row of native)if(['STARTING','RUNNING','PREEMPTING','CANCELING'].includes(row.state))add(row.assigned_gpu_indices);
+    for(const row of jobs)if(row.machine===job.machine&&['STARTING','RUNNING','PREEMPTING','CANCELING'].includes(row.state))add(row.assignedIndices);
+    for(const gpu of host.gpus||[])if(gpu.processesAvailable===true&&gpu.processes?.length)add([gpu.index]);
+    // An occupied card can still accept an explicitly shared job. In particular
+    // process count is not a lease count or a declared sharing-person limit.
+    if(!shared&&occupied.size===machine.cards){
+      const rank=row=>Number.isInteger(row.schedulerPriority)?row.schedulerPriority:
+        Number.isInteger(row.priority)?row.priority:RANKS[row.priority]??RANKS[row.spec?.scheduling?.rank]??2;
+      const time=value=>typeof value==='number'?value*(value<1e12?1000:1):Date.parse(value);
+      const before=row=>rank(row)>rank(job)||rank(row)===rank(job)&&time(row.createdAt??row.created_at)<time(job.createdAt);
+      const pending=jobs.filter(row=>row.machine===job.machine&&row.id!==job.id&&row.state==='PENDING'&&!row.cancelRequested);
+      const known=new Set(jobs.filter(row=>row.machine===job.machine).map(row=>row.nodeJobId).filter(Boolean));
+      const other=[...new Map(native.filter(row=>row.state==='PENDING'&&row.id!==job.nodeJobId&&!known.has(row.id)).map(row=>[row.id,row])).values()];
+      const ahead=[...pending,...other].filter(before).length;
+      return `显卡已满（${occupied.size}/${machine.cards} 张被占用，前面还有 ${ahead} 个排队）`;
+    }
+    // The current node contract exposes share_gpu, not a maximum people count.
+    // Only an explicit node state_reason can confirm that limit (handled above).
+  }
+  const preparing=job.dataPreparation?.datasets?.some(ref=>ref.state!=='READY');
+  if(job.state===DATA_PREPARING||preparing)return '数据准备中';
+  if(service.maintenanceFor?.(job.machine))return '机器维护中';
+  const user=service.store.get(job.userId),limit=user.limits?.[job.machine];
+  if(!personalCardQuotaExempt(user)&&Number.isSafeInteger(limit)&&limit>=0){
+    // The current pending job already owns its reservation; counting it as
+    // its own blocker would incorrectly label an admitted one-card job full.
+    const used=usage(jobs.filter(row=>row.id!==job.id),job.userId,job.machine);
+    if(used>=limit)return `配额已满（本人在该机已用 ${used}/${limit} 张）`;
+  }
+  return '等待调度器分配，原因未上报';
+}
+export function publicJob(job,users=[]){const {spec,digest,schedulerPolicy,dataPreparationHold,dispatchPending,trainingStoragePlan:privateStoragePlan,trainingStorageRequest:privateStorageRequest,trainingPreparations:privatePreparations,nativeTaskDisplay:displayCache,...safe}=job;return {...safe,...projectProgress(job),...jobTiming(job),...taskIdentity(job,users),command:spec.argv,
   yieldPolicy:['legacy','never','now','save'].includes(schedulerPolicy?.yield_policy)?schedulerPolicy.yield_policy:null,
   restartPolicy:['never','on-preempt'].includes(schedulerPolicy?.restart_policy)?schedulerPolicy.restart_policy:null,
   dispatchMode:['queue','preempt-now','preempt-save'].includes(schedulerPolicy?.dispatch_mode)?schedulerPolicy.dispatch_mode:null};}
-export async function executionCall(service,principal,operation,args){
+export async function executionCall(service,principal,operation,args,readContext){
   if(!service.bridge&&!['datasets.upload.admission.create','datasets.upload.admission.status'].includes(operation))fail('节点执行桥尚未配置，未启动训练。',503,operation==='jobs.submit'?'SUBMISSION_REJECTED':undefined);
   const user=service.store.get(principal.userId);
-  const jobView=job=>publicJob(job,service.store.users);
+  const jobView=job=>({...publicJob(job,service.store.users),queueReason:pendingJobReason(service,job)});
   if(!user.enabled)fail('账号已暂停。',403);
   service.assertMaintenanceAllowed?.(operation,args,principal);
-  service=displayReadService(service,operation);
   if(['datasets.delete','datasets.delete.status','datasets.delete.restore','datasets.delete.continue','datasets.delete.cancel','datasets.delete.registration.discard'].includes(operation))return service.datasetDeletionCall(principal,operation,args);
-  if(['datasets.catalog','datasets.capacity'].includes(operation))return datasetCatalogCall(service,principal,operation,args);
-  if(operation==='datasets.overview')return datasetStorageOverviewCall(service,principal,args);
+  if(['datasets.catalog','datasets.capacity'].includes(operation))return datasetCatalogCall(service,principal,operation,args,{displayCache:operation==='datasets.catalog'});
+  if(operation==='datasets.overview')return datasetStorageOverviewCall(service,principal,args,{displayCache:true});
   if(operation==='datasets.files.list')return datasetFilesCall(service,principal,args);
   if(operation==='datasets.training.capabilities')return trainingDatasetCapabilities(service,principal,args);
   const authorizedMachine=machine=>{if(!MACHINES.some(m=>m.id===machine)||!user.limits[machine])fail('这台机器未授权。',403);};
+  if(['files.put','files.get'].includes(operation)){
+    authorizedMachine(args.machine);
+    fail('普通文件正文只允许校园直连；请升级客户端并查询原上传编号，不会经 VPS 中转。',410,'CAMPUS_FILE_REQUIRED');
+  }
   if(operation.startsWith('datasets.storage.')){
     if(principal.role!=='admin')fail('存储管理仅管理员可用。',403);
     authorizedMachine(args.machine);
@@ -275,6 +334,7 @@ export async function executionCall(service,principal,operation,args){
     if(result===undefined)fail('未知同步操作。');return result;
   }
   if(['host.exec','host.status','host.cancel'].includes(operation)){
+    assertHostRootAllowed(service,principal,operation,args);
     if(principal.role!=='admin')fail('宿主机命令仅管理员可用。',403);
     authorizedMachine(args.machine);
     const allowed=operation==='host.exec'?['machine','key','argv','cwd','timeoutSec']:['machine','id'];
@@ -304,7 +364,7 @@ export async function executionCall(service,principal,operation,args){
   if(operation.startsWith('datasets.workspace.')){
     authorizedMachine(args.machine);
     const action=operation.slice('datasets.workspace.'.length);
-    const fields={list:['path'],get:['path','offset'],put:['path','offset','data','truncate'],status:['operationId'],publish:['path','name','key']}[action];
+    const fields={list:['path'],get:['path','offset','fingerprint'],put:['path','offset','data','truncate'],status:['operationId'],publish:['path','name','key']}[action];
     if(!fields||Object.keys(args).some(k=>!['machine',...fields].includes(k)))fail('个人数据目录参数无效。');
     const uuid=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
     if(action!=='status'){
@@ -313,17 +373,20 @@ export async function executionCall(service,principal,operation,args){
           (path!=='.'&&path.split('/').some(p=>!p||p==='.'||p==='..'||Buffer.byteLength(p)>255))||
           (path==='.'&&['put','get','publish'].includes(action)))fail('请使用个人 /data2 内的相对路径，不要填写宿主机路径。');
     }
-    if(args.offset!==undefined&&(!Number.isSafeInteger(args.offset)||args.offset<0||args.offset>100*1024**3))fail('文件偏移量无效。');
+    if(args.offset!==undefined&&(!Number.isSafeInteger(args.offset)||args.offset<0))fail('文件偏移量无效。');
+    if(args.fingerprint!==undefined&&(typeof args.fingerprint!=='string'||!/^[a-f0-9]{64}$/.test(args.fingerprint)))fail('下载文件身份无效。');
     if(action==='put'){
       if(!Number.isSafeInteger(args.offset)||args.truncate!==undefined&&typeof args.truncate!=='boolean'||args.truncate&&args.offset!==0)fail('上传偏移或覆盖参数无效。');
       if(typeof args.data!=='string'||args.data.length>1398104||args.data.length%4!==0||/[^A-Za-z0-9+/=]/.test(args.data)||Buffer.from(args.data,'base64').toString('base64')!==args.data||Buffer.from(args.data,'base64').length>1024*1024)fail('上传分块最多 1 MiB，且需使用规范 Base64。');
-      if(args.offset+Buffer.from(args.data,'base64').length>100*1024**3)fail('单文件上限 100 GiB；更大文件请联系管理员本地导入。');
+      if(!Number.isSafeInteger(args.offset+Buffer.from(args.data,'base64').length))fail('文件字节数无效。');
     }
     if(action==='publish'&&(!uuid.test(args.key||'')||typeof args.name!=='string'||!/^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/.test(args.name)))fail('发布需提供连接键和有效的数据集名称。');
     if(action==='status'&&args.operationId!==undefined&&!uuid.test(args.operationId))fail('发布操作编号无效。');
+    if(action==='put')rejectWorkspaceRelay();
     const {machine,...request}=args;
     if(action==='publish')service.audit(principal.username,operation,machine,args.name);
-    return service.bridge(machine,operation,{...request,userId:user.id,hostAdmin:false});
+    try{return await service.bridge(machine,operation,{...request,userId:user.id,hostAdmin:false});}
+    catch(error){if(String(error?.message).includes('OWNER_ARCHIVE_FORBIDDEN:'))fail('历史材料不属于当前账号或授权已改变。',403);throw error;}
   }
   if(operation.startsWith('datasets.upload.')){
     authorizedMachine(args.machine);
@@ -350,16 +413,20 @@ export async function executionCall(service,principal,operation,args){
       const data=Buffer.from(args.data,'base64');
       if(data.length>1024*1024||data.toString('base64')!==args.data)fail('上传分块最多 1 MiB，且需使用规范 Base64。');
     }
+    requireCampusUpload(action,args);
     const {machine,...request}=args;
     if(action.startsWith('admission.')&&!service.datasetUploadIngress)fail('机械仓库新上传准入尚未安装。',503);
     // Every upload is personal, including uploads made by administrators. No
     // client-provided role, source mapping or filesystem path crosses the bridge.
     if(['begin','admission.create','seal','commit','discard','direct-ticket','direct-revoke'].includes(action))service.audit(principal.username,operation,machine,id);
-    if(service.datasetUploadIngress)return service.datasetUploadIngress(principal,action,args);
+    if(service.datasetUploadIngress){
+      const value=await service.datasetUploadIngress(principal,action,args,readContext);
+      return campusUploadReply(action,value,value?.storageMachine||machine);
+    }
     // The public routes uploadId is a Portal placement selector. Legacy node
     // route metadata has no session field and must keep its old wire contract.
     if(action==='routes')delete request.uploadId;
-    return service.bridge(machine,operation,{...request,userId:user.id,hostAdmin:false});
+    return campusUploadReply(action,await service.bridge(machine,operation,{...request,userId:user.id,hostAdmin:false},readContext),machine);
   }
   if(operation==='datasets.archive.enroll'){
     if(!service.enrollStorageArchive)fail('长期归档尚未配置。',409);
@@ -460,6 +527,7 @@ export async function executionCall(service,principal,operation,args){
     const opening=operation==='terminal.open',status=operation==='terminal.status',stoppedClose=operation==='terminal.close'&&args.writerToken===undefined,mode=args.mode||'new';
     const allowed=['machine','id','hostAdmin','project','dataWorkspace',...(!status?['clientId','writerToken']:[]),...(opening?['key','mode','takeover']:operation==='terminal.exchange'?['input','offset','rows','cols']:[])];
     if(Object.keys(args).some(k=>!allowed.includes(k)))fail('终端参数无效。');
+    assertHostRootAllowed(service,principal,operation,args);
     if(args.hostAdmin&&principal.role!=='admin')fail('宿主机 root 终端仅管理员可用。',403);
     const uuid=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
     if(!status&&!stoppedClose&&(typeof args.clientId!=='string'||!uuid.test(args.clientId)))fail('请升级客户端或刷新网页：终端需要独立会话和单写租约。');
@@ -553,7 +621,10 @@ export async function executionCall(service,principal,operation,args){
         const catalogVersions=datasets.map(ref=>catalog.datasets?.find(d=>d.dataset===ref.dataset)?.versions?.find(v=>v.version===ref.version));
         if(catalogVersions.some((value,index)=>states[index].state!=='READY'&&value&&value.canUse!==true))
           rejectSubmission('当前账号没有数据集读取授权；目录可见不代表可以训练读取。未占用 GPU。',403);
-        if(!datasets.every((ref,index)=>states[index].state==='READY'||catalogVersions[index]?.canUse===true&&(catalogVersions[index].canPrepare===true||catalogVersions[index].state==='PREPARING')))rejectSubmission('部分数据没有可用来源；请先在数据集页面完成导入。未占用 GPU。',409);
+        const preparable=index=>states[index].state==='READY'||catalogVersions[index]?.canUse===true&&(catalogVersions[index].canPrepare===true||catalogVersions[index].state==='PREPARING');
+        // Unknown owner-bound reads cannot prove that the source is missing.
+        if(states.some((state,index)=>state.state==='UNKNOWN'&&!preparable(index)))rejectSubmission('部分数据的来源查询尚未确认，请稍后查询原数据状态再提交。未占用 GPU。',503);
+        if(!datasets.every((ref,index)=>preparable(index)))rejectSubmission('部分数据没有可用来源；请先在数据集页面完成导入。未占用 GPU。',409);
         if(service.store.jobs.filter(j=>j.userId===user.id&&j.state===DATA_PREPARING).length>=10)rejectSubmission('最多保留 10 个数据准备中的训练，请先等待或取消。',429);
         needsPreparation=true;
       }
@@ -675,7 +746,7 @@ export async function executionCall(service,principal,operation,args){
     catch{
       // Keep advisory progress inspectable, but never treat an observation as
       // a saved lifecycle result or release the restored reservation.
-      const observed={...job};applyJobFeedback(observed,result);
+      const observed={...job};applyJobFeedback(observed,result);observed.progressCheckedAt=new Date().toISOString();
       return {...jobView(observed),state:'UNKNOWN',notSaved:true,error:'节点观察结果未保存，任务状态待核对。',checkedAt:new Date().toISOString()};
     }
   }
@@ -685,29 +756,56 @@ export async function executionCall(service,principal,operation,args){
     if(!TERMINAL.has(job.state))return service.bridge(job.machine,'diagnostics',{job:job.spec});
     try{
       const result=await service.bridge(job.machine,'diagnostics',{job:job.spec,...(job.nodeJobId?{expectedNodeJobId:job.nodeJobId}:{})});
-      return {...result,portalTerminal:portalTerminalSnapshot(job),nativeObservation:terminalNativeObservation(job,result?.nativeObservation)};
+      const nativeObservation=terminalNativeObservation(job,result?.nativeObservation),recovery=cacheBusyRecovery(job,result,nativeObservation);
+      return {...result,portalTerminal:portalTerminalSnapshot(job),nativeObservation,...(recovery?{recovery}:{})};
     }catch{return {jobId:job.id,state:'UNAVAILABLE',portalTerminal:portalTerminalSnapshot(job),nativeObservation:unavailableObservation()};}
   }
   if(['files.list','files.put','files.get','files.upload.status','files.upload.list','files.upload.cancel'].includes(operation)){
     authorizedMachine(args.machine);
-    if(Object.keys(args).some(k=>!['machine','path','data','offset','truncate','project','area','runId','uploadId','totalSize','sha256','final',...(operation==='files.get'?['fingerprint']:[])].includes(k)))fail('文件参数无效。');
+    if(Object.keys(args).some(k=>!['machine','path','data','offset','truncate','project','area','runId','uploadId','totalSize','sha256','final',...(operation==='files.get'?['fingerprint']:[]),...(operation==='files.upload.cancel'?['receiptSha256','projectUUID','projectGeneration']:[]),...(operation==='files.upload.list'?['pathPrefix','cursor','limit']:[]),...(operation==='files.list'?['cursor','limit']:[])].includes(k)))fail('文件参数无效。');
+    if(operation==='files.list'){
+      if(args.cursor!==undefined&&(typeof args.cursor!=='string'||! /^[A-Za-z0-9_-]{1,4096}$/.test(args.cursor)))fail('目录分页游标无效。');
+      if(args.limit!==undefined&&(!Number.isSafeInteger(args.limit)||args.limit<1||args.limit>1000))fail('目录每页条数须为 1–1000。');
+    }
     if(args.fingerprint!==undefined&&(typeof args.fingerprint!=='string'||!/^[a-f0-9]{64}$/.test(args.fingerprint)))fail('下载文件身份无效。');
     const project=validateProjectFile(args);
     if(operation==='files.upload.status'&&(!args.project||project.area==='output'||Object.keys(args).some(k=>!['machine','path','project','area','uploadId','totalSize','sha256'].includes(k))))fail('上传状态仅用于个人项目代码文件的固定路径、大小和校验和。');
     if(['files.upload.list','files.upload.cancel'].includes(operation)){
-      const allowed=['machine','project','area',...(operation==='files.upload.cancel'?['uploadId']:[])];
+      const allowed=['machine','project','area',...(operation==='files.upload.cancel'?['uploadId','receiptSha256','projectUUID','projectGeneration']:['path','pathPrefix','cursor','limit'])];
       if(!args.project||project.area!=='code'||Object.keys(args).some(k=>!allowed.includes(k)))fail('待上传管理只适用于本人的项目代码。');
+      if(operation==='files.upload.list'){
+        if(Object.hasOwn(args,'path')&&Object.hasOwn(args,'pathPrefix'))fail('请选择精确路径或目录前缀。');
+        for(const field of ['path','pathPrefix'])if(Object.hasOwn(args,field)){
+          const value=args[field];
+          if(typeof value!=='string'||!value||value.length>1024||value.includes('\\')||/[\p{Cc}\p{Cf}]/u.test(value)||value.split('/').some(p=>!p||p==='.'||p==='..'||p.length>255))fail('回执路径须为项目内的相对路径。');
+        }
+        if(args.cursor!==undefined&&(typeof args.cursor!=='string'||! /^[A-Za-z0-9_-]{1,4096}$/.test(args.cursor)))fail('回执分页游标无效。');
+        if(args.limit!==undefined&&(!Number.isSafeInteger(args.limit)||args.limit<1||args.limit>64))fail('回执每页条数须为 1–64。');
+      }
       if(operation==='files.upload.cancel'&&(typeof args.uploadId!=='string'||!UUID.test(args.uploadId)))fail('取消上传必须使用原上传 UUID。');
+      if(['receiptSha256','projectUUID','projectGeneration'].some(k=>Object.hasOwn(args,k))&&
+        (typeof args.projectUUID!=='string'||!UUID.test(args.projectUUID)||![args.receiptSha256,args.projectGeneration].every(v=>typeof v==='string'&&/^[a-f0-9]{64}$/.test(v))))fail('回执恢复需要原回执校验值和项目身份，请先查询 project uploads。');
     }
+    let outputJob;
     if(project.area==='output'){
       const job=jobById(args.runId);
       // Admin resource inspection does not implicitly read somebody else's
       // personal output. Host-root maintenance is its own audited interface.
       if(job.userId!==user.id||job.machine!==args.machine||job.project!==args.project)fail('任务输出不属于当前用户、项目或服务器。',403);
       if(operation==='files.put')fail('不能通过上传覆盖训练输出。');
+      outputJob=job;
     }
     if(args.project&&operation==='files.put'&&args.truncate!==undefined)fail('项目上传须完整校验后原子提交，不接受 truncate。');
-    return service.bridge(args.machine,operation,{...args,userId:user.id});
+    try{
+      const result=await service.bridge(args.machine,operation,{...args,userId:user.id});
+      if(operation==='files.upload.list'&&['path','pathPrefix','cursor','limit'].some(key=>Object.hasOwn(args,key))){
+        const page=result?.staleReceiptPage;
+        if(result?.staleReceiptPaginationProtocol!==1||page?.protocol!=='stale-upload-receipt-page-v1'||page.path!==(args.path??null)||page.pathPrefix!==(args.pathPrefix??null)||page.limit!==(args.limit??64))fail('节点尚未确认回执路径过滤或分页，请升级节点后重试。',409);
+      }
+      return result;
+    }
+    catch(error){throw jobOutputReadError(outputJob,error);}
   }
   fail('未知执行操作。');
 }
+import {assertHostRootAllowed} from './host-root-policy.mjs';

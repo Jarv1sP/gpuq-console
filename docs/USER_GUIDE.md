@@ -29,6 +29,10 @@ curl -fsSL https://gpu.example.com/install.sh | sh
 
 安装只写用户目录，不需要管理员权限或修改 PowerShell 执行策略。重新打开终端后使用；更新仍运行同一安装命令。Windows 与 WSL 分别安装、分别登录。
 
+### 旧客户端
+
+旧客户端的 `jobs --json` 中，历史终态作业只提供精简字段，列表可能截断；按任务 ID 查询日志、进度和完成状态仍可使用完整接口，建议运行上面的官方安装命令升级。
+
 ### 2 登录并选机器
 
 管理员提供注册码后，在网页注册账号。新账号的用卡额度为 0；管理员授权机器和卡数后才能训练。不需要安装 Tailscale 或持有服务器 SSH 密钥。
@@ -51,6 +55,19 @@ gpuctl use MACHINE_ID
 4. [日志与结果](/guide/results)：logs、watch；确认完成后 files、pull。需要中止时单独 cancel。
 
 ! 每一步确认后再继续；`UNKNOWN` 先查原编号，不重建任务。
+
+### 参考耗时
+
+2026-10-09 在 5090 服务器上使用 Windows 客户端的小型单卡实测，仅供参考；文件大小、网络、排队和校验会改变耗时，不是完成时间保证。
+
+- push 代码：9.9s。
+- publish 固定版本：10.5s。
+- 约 100 MiB 数据集校园直传到 `READY`：70s。
+- 单卡 `run --data-read warehouse` 提交：10.7s。
+- logs 读取：4.5s。
+- watch 确认本轮任务完成：10.3s。
+- pull 本轮小结果文件：7.4s。
+- AUTO run 提交：21.3s。
 
 
 ### 网页入口
@@ -145,7 +162,7 @@ TMPDIR="$HOME/.cache/build-tmp" python -m pip install -r requirements.txt
 
 项目文件上传中断时，保留原文件和远端文件名，重复同一条 `gpuctl push` 会先核对上传身份并从已确认的字节继续；不会自动发布或提交训练。只检查、不继续传输可用 `gpuctl push-status 本机文件 远端文件名 --json`。`COMPLETE` 表示该文件已完整校验；若同时有 `completionPending:true`，再运行原 `push` 完成回执收尾，不会重传内容。项目中某个旧版本 `READY` 不代表本次上传完成。
 
-如果提示目标被修改、上传身份冲突或旧上传缺少安全恢复记录，停止重试并联系管理员；不要换名字绕过。上传期间不要在个人终端或容器内同时修改同一路径：目标变化检测不等于对终端写入加锁，正常 `push` 本身会替换目标文件。配套新 CLI 和节点允许超过 4 GiB 的项目文件并提示容量警告，完整恢复核验需要读取一次目标文件，大文件或慢盘可能需要等待；数据集仍用数据上传流程。
+如果提示目标被修改、上传身份冲突或旧上传缺少安全恢复记录，停止重试并联系管理员；不要换名字绕过。上传期间不要在个人终端或容器内同时修改同一路径：目标变化检测不等于对终端写入加锁，正常 `push` 本身会替换目标文件。单文件超过 4 GiB、项目或容器超过容量提醒阈值（包括 100 GiB）只警告，不阻止上传、发布或迁移；磁盘空间不足仍会拒绝。节点更新前如仍提示 4 GiB 上限，请联系管理员更新节点。完整恢复核验需要读取一次目标文件；数据集仍用数据上传流程。
 
 文件已在该服务器个人数据区时，可用 `gpuctl project import 源目录 新目标目录` 直接复制到本项目草稿，不绕门户传字节。两个路径相对，目标须新建、父目录已存在；先结束项目和个人数据终端。`gpuctl project import-status UUID` 等到 `IMPORTED` 后再编辑依赖和发布。任意宿主路径和只读数据集不支持。停止用 `project import-cancel UUID`；UNKNOWN 保留原 UUID，不换新操作。
 
@@ -217,6 +234,8 @@ gpuctl run --machine auto -g 2 --min-vram 24 -- python train.py --output /output
 手动复制一个固定的个人容器版本可用 `gpuctl project copy 项目名 --from SOURCE --to TARGET --release FULL_HASH`，随后 `gpuctl project copy-status COPY_ID` 查看进度。它只准备训练版本，不覆盖目标开发草稿；取消复制使用 `project copy-cancel COPY_ID`。
 
 复制明确失败或取消后，排查原因，再用 `gpuctl project copy-retry COPY_ID` 显式重试。平台先确认旧 worker 已停止、传输临时文件已清理，才建立同来源、同目标、同版本的新操作；不会自动无限重跑。保留打印的重试键，响应不明时加原 `--key UUID` 重复这条命令；`UNKNOWN` 只能先查状态，不能强行重试。复制恢复就绪后再重新提交失败的训练，旧训练不会自动重启。
+
+复制到尚未初始化开发环境的项目时，开发环境继承复制的固定 READY 镜像；已有开发环境保持不变。要明确改用某个已复制或已发布的环境，先退出该项目的开发终端，再运行 `gpuctl project publish --inherit-release READY_HASH`，也可用 `latest` 指最新 READY。它保留当前代码，先保存旧开发 head（包括原镜像和停止的容器）作为回退快照，再继承所选环境并发布；回执返回 `previousHeadSnapshot`。记录打印的发布 key，回执不明先查 `project status`，重试沿用原 `--inherit-release` 和 `--key`。不加此参数的发布行为不变；旧节点没有继承能力时会拒绝，不会默认重建环境。
 
 停用账号或收回机器权限后，后台在下一次状态检查中先撤销来源下载凭证，再停止和清理目标复制；这不是零延迟操作。节点离线时会保留待清理状态，不把“尚未确认停止”显示成“已清理”。
 
@@ -360,6 +379,8 @@ gpuctl data upload ./my-data --name my-data --via campus
 ```
 
 ! 保存输出的 Upload UUID；不要修改待上传目录或更换账号。
+
+! 0 点后宿舍到实验室的校园网段不通；网络恢复后用原目录和原编号续传。
 
 #### 只查询原上传
 
@@ -538,6 +559,8 @@ gpuctl diagnostics JOB_ID --json
 
 `watch` 默认每 5 秒核对，`--interval 1` 可调整；Ctrl+C 只停止查看。完成、失败、取消或状态未知时反馈并退出，断开连接后可再次 `watch`；不会取消、恢复或重试训练。
 
+训练前出现 `CacheBusy` 表示等待数据缓存锁超时，不表示缓存损坏或数据已就绪。先用 `gpuctl diagnostics JOB_ID --json` 和 `gpuctl watch JOB_ID` 核对原任务；只有节点确认原任务已停止、`FAILED`、准备阶段为 `PROJECT_PREPARATION / CacheBusy`，并且数据已就绪后，才重复原 `run` 命令并去掉旧 `--key`（或换新 UUID）显式新建一次训练。保留原项目、固定 `--release`、数据版本和训练参数，原失败历史不会消失。原 key 幂等返回原 FAILED，不会启动新训练；超时、UNKNOWN、运行中或节点重试未核实则继续查原 UUID，不要换 key。`restart-policy never` 仍不自动重跑。
+
 若曾由管理员在节点上用原生 `gpu retry` 重试同一任务，门户历史终态不会被自动改写。`watch` 与 `diagnostics` 可另外返回该节点的只读观察及已确认重试事件；缺少身份或事件证据时显示未确认。`watch` 会明确区分“门户历史结果”和“节点只读观察”，退出码仍按原门户终态，不代表新一次运行已结束；此查询不会清除取消标记、重新申请数据保护或批准重试。需要恢复执行时请管理员核对原 UUID 的当前状态与保护边界，不要反复重试或另建任务绕过。
 
 若原生重试已经成功，但后续任务仍被门户旧 FAILED 记录挡住，用 `gpuctl completion JOB_ID --json` 核验同一任务的最新完成状态。只有返回 `completed:true` 且任务 ID、项目、发布版本符合预期才可作为完成依据；旧失败历史保留，不需要重复训练。该命令成功核实退出 0、未确认退出 2、请求错误退出 1，不替代结果质量检查。
@@ -549,6 +572,10 @@ gpuctl diagnostics JOB_ID --json
 网页任务表可显示轮次、步数和训练上报 ETA。准确进度需要程序接入 `gpuq.progress.ProgressReporter`；未适配显示「进度未上报」，仍可看日志。训练上报 100% 或异常，不代表平台已确认任务结束。`RUNNING` 不保证每个 worker 都健康；先看最近 200 行主日志，再看 worker 诊断、退出原因和历史分配。
 
 任务详情和 CLI 区分「节点运行结束」与「门户确认终态」：前者来自最近一次调度运行记录，后者可能因离线或稍后对账而延迟。原始 JSON 的 `workerFinishedAt` 与 `terminalObservedAt` 分别对应两者；旧字段 `finishedAt` 保留门户确认时间的兼容含义，不应用来计算实际训练时长。节点结束证据缺失时显示未确认；不因诊断包不完整就编造退出原因，也不改写原任务历史。
+
+配套新版节点与 CLI 的 `gpuctl files REMOTE_DIR --job JOB_ID --project PROJECT --json` 返回本页 `entries`、目录 `total`、`hasMore` 和 `nextCursor`。保持原账号、机器、项目、作业和目录，在相同命令加 `--cursor NEXT_CURSOR` 继续，`--limit 1..1000` 控制每页数量。`nextCursor:null` 才表示该目录已列完；目录中有子目录时需分别列出。目录或身份变化会拒绝旧游标，请从第一页重新核对；列出的文件可按原路径 `pull --job` 并核验自己的原 SHA。旧节点仅返回最多1000项，不能据此判断未列出的文件已删除；请求分页而节点未确认协议时新版 CLI 会明确拒绝把它当全量。
+
+现役项目输出没有可核实的逐作业到期字段，也没有本人延长或保护命令。分页回包的 `retention.status:UNCONFIRMED`、`expiresAt:null` 表示保留期未知，不表示永久保存，也不能套用其他内容的30天。归档保留历史输出但不构成已验证备份；请经官方 `pull` 下载并逐 SHA 核验，另行确认管理员明确提供的备份范围和恢复证据。
 
 查看 JSON 时，本次尝试的退出码是 `latestAttempt.exitCode`，调度运行时间是 `latestAttempt.startedAt` / `latestAttempt.finishedAt`（Unix 秒）；`workerStartedAt` / `workerFinishedAt` 使用 ISO 日期时间。不要到顶层查不存在的同名字段；缺值表示未确认，不猜成退出码 0 或时间 0。
 
@@ -596,6 +623,60 @@ gpuctl note --general "本周维护安排"
 ```
 
 网页打开「协作区 → 聊天」，展开聊天里的“任务留言”，有相同入口。任务留言只能关联自己的未结束平台任务，平台确认完成、失败或取消后自动清理正文；排队、让位中、状态未知时保留。非任务留言保留到手动删除。作者可用 `gpuctl note-delete NOTE_ID` 删除自己的留言，管理员可删除他人留言。留言对登录成员可见，每条最多 2000 字符；普通聊天消息不跟随训练结束自动清理。
+
+### 清理测试内容
+
+先确认任务已结束、结果已下载，只清理自己的测试对象。保留项目历史时用归档，代码和结果仍在：
+
+```sh local
+gpuctl project archive my-project --machine MACHINE_ID
+```
+
+从未有训练或输出的测试项目，先读取退役计划：
+
+```sh local
+gpuctl project retire-plan my-project --machine MACHINE_ID --json
+```
+
+只有计划为 `ELIGIBLE` 才退役。`N` 取计划的 `lifecycle.revision`，`MANIFEST_SHA256` 取 `manifestSha256`；生成并保存本次的 UUID：
+
+```sh local
+gpuctl project retire my-project --machine MACHINE_ID --key UUID --revision N --manifest-sha256 MANIFEST_SHA256
+```
+
+结果未确认时只查原 UUID：
+
+```sh local
+gpuctl project retire-status UUID --machine MACHINE_ID --project my-project
+```
+
+退役会隔离保留代码和容器，当前没有永久清除入口；有训练历史的项目使用归档，不强删。
+
+确定不要的未完成上传，先查原编号，再放弃；已就绪的数据集不能用这条命令删除：
+
+```sh local
+gpuctl data upload-status UPLOAD_ID --machine MACHINE_ID
+gpuctl data upload-discard UPLOAD_ID --machine MACHINE_ID
+```
+
+旧代码上传用下面的列表找到原编号，只取消其中明确可取消、且不再需要的临时上传：
+
+```sh local
+gpuctl project uploads --machine MACHINE_ID --project my-project
+gpuctl project upload-cancel UPLOAD_ID --machine MACHINE_ID --project my-project
+```
+
+不再使用的本人测试数据集，只有节点已开启删除能力才可删除。用完整数据集 ID 和版本，保存本次删除 UUID：
+
+```sh local
+gpuctl data delete DATASET_ID@VERSION --key UUID
+```
+
+回执丢失或还未完成时只查原 key；删除会先进入保留期，不代表磁盘已释放：
+
+```sh local
+gpuctl data delete-status UUID
+```
 
 ## 排队与协作 {#queue}
 
@@ -645,7 +726,7 @@ gpuctl run --rank P2 --mode preempt2 -g 1 -- python urgent.py
 
 提示「节点未确认个人数据工作区的校园上传协议」「节点未确认原下载的固定校园来源」或 `Invalid campus file capability scope` 时，客户端已停止。请管理员配对节点版本，保留原编号、文件与断点；换客户端、换名称或重投不能补齐节点能力。
 
-文件字节只走已确认的校园直连入口。先恢复校园网络，保留原 UUID、机器、名称和本机目录，再执行原上传或下载命令；不改用中转、不换新编号。
+0 点后宿舍到实验室的校园网段不通，上传和下载需等这段网络恢复。文件字节只走已确认的校园直连入口；保留原 UUID、机器、名称和本机目录，再执行原上传或下载命令，不改用中转、不换新编号。
 
 `HASHING` 是本机散列，尚未开始传输；`WAITING_CLIENT` 在等电脑，`UNKNOWN` 是结果未确认。查询原编号，不能当成失败、成功或已停止。目录或文件已变时停止，先处理身份冲突。
 

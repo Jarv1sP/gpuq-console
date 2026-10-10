@@ -2,6 +2,7 @@ import {completionMatchesJob} from './job-diagnostics-ui.js';
 const uuid=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const id=/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/,projectID=/^[a-z][a-z0-9_-]{0,47}$/;
 const ended=new Set(['SUCCEEDED','FAILED','CANCELED']);
+const resultReminder='请及时将结果下载到自己的电脑；平台不会自动备份或删除。';
 const esc=value=>String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
 export function ownResultJob(store,job){return store.production===true&&store.principal?.enabled!==false&&!!store.principal?.userId&&job?.userId===store.principal.userId&&job.source!=='native'&&ended.has(job.state)&&!job.cancelRequested&&typeof job.id==='string'&&typeof job.machine==='string'&&typeof job.project==='string'&&uuid.test(job.id)&&id.test(job.machine)&&projectID.test(job.project);}
 export function successfulResult(value,job){return completionMatchesJob(value,job)&&value.completed===true&&value.state==='SUCCEEDED'&&value.project===job.project&&(!job.release||value.release===job.release);}
@@ -46,9 +47,9 @@ export function createJobResultAccess({store,changed=()=>{}}){
  }
  async function drain(){if(busy)return;busy=true;try{while(queue.length)await check(queue.shift());}finally{busy=false;}}
  function sync(jobs){queue=[...jobs].reverse().filter(job=>ownResultJob(store,job)&&!attempted.has(binding(job)));void drain();paint();}
- function markup(job){if(!ownResultJob(store,job))return '';return `<span data-job-result-slot="${esc(job.id)}" ${allowed(job)?'':'hidden'}>${allowed(job)?`<button class="button quiet" type="button" data-job-pull="${esc(job.id)}">拉取结果</button>`:''}</span>`;}
+ function markup(job){if(!ownResultJob(store,job))return '';return `<span data-job-result-slot="${esc(job.id)}" ${allowed(job)?'':'hidden'}>${allowed(job)?`<button class="button quiet" type="button" data-job-pull="${esc(job.id)}" title="${resultReminder}">拉取结果</button>`:''}</span>`;}
  function paint(root=globalThis.document){
-  for(const slot of root?.querySelectorAll?.('[data-job-result-slot]')||[]){const job=(store.jobs||[]).find(row=>row.id===slot.dataset.jobResultSlot),show=allowed(job);slot.hidden=!show;if(show&&!slot.firstElementChild){const button=slot.ownerDocument.createElement('button');button.className='button quiet';button.type='button';button.dataset.jobPull=job.id;button.textContent='拉取结果';slot.append(button);}else if(!show)slot.replaceChildren();}
+  for(const slot of root?.querySelectorAll?.('[data-job-result-slot]')||[]){const job=(store.jobs||[]).find(row=>row.id===slot.dataset.jobResultSlot),show=allowed(job);slot.hidden=!show;if(show&&!slot.firstElementChild){const button=slot.ownerDocument.createElement('button');button.className='button quiet';button.type='button';button.dataset.jobPull=job.id;button.title=resultReminder;button.textContent='拉取结果';slot.append(button);}else if(!show)slot.replaceChildren();}
  }
  function clear(){turn++;queue=[];for(const controller of controllers)controller.abort();controllers.clear();proofs.clear();attempted.clear();pending.clear();changed();}
  const unsubscribe=store.onAuthChange?.(clear);

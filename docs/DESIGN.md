@@ -769,3 +769,4 @@ prefers-reduced-motion移除位移、液位变化与循环，必要反馈用150m
 目录读取失败也保留最后成功的可读列表十分钟，整体变淡并显示原采集时间；历史列表按钮全部禁用，详情和训练/缓存操作清空，不把旧列表恢复为当前授权事实。到期清空列表并显示未知，换账号立即清空。
 
 压缩包上传只在节点明确声明 archive protocol 1 后替代目录选择。沿用原 UUID、偏移和校园直连；界面只显示上传、解压、校验、已入库一条状态，未知或失败不当成功，账号变化清空文件选择。
+Production source `e6cce52` is mapped in [PRODUCTION_SYNC.md](PRODUCTION_SYNC.md). In this release, incomplete cache totals retain the known lower bound and expose the server reason in the existing hover hint. Narrow usage segments remain proportional without turning into punctuation-sized gaps. Upload receipt diagnostics support path filters and cursors; they do not change the original upload identity or authorize replay.

@@ -16,6 +16,8 @@ export {endProjectTerminals} from './terminal-ui.js';
 import {revealSheet,dismissSheet,sharedObject} from './motion-ui.js';
 import {taskNotesMarkup,createTaskNotesUI} from './task-notes-ui.js';
 import {maintenanceFor,heldDuringMaintenance,maintenanceTime,maintenanceInfoHTML,maintenanceClock} from './maintenance-state.js';
+import {hashBlob} from './dataset-upload.js';
+import {createPersonalFileTransport,downloadPersonalFile,LARGE_PERSONAL_FILE_BYTES} from './personal-file-campus.js';
 const escape=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const terminal=new Set(['SUCCEEDED','FAILED','CANCELED']);
 const hashPattern=/^[a-f0-9]{64}$/;
@@ -131,17 +133,19 @@ export function projectDiskQuotaHTML(value,owner){
   });
   return '<ul class="disk-quota-volumes">'+rows.join('')+'</ul>';
 }
-export async function uploadProjectFile(file,context,send,progress=()=>{},{inspect,signal,current=()=>true,onRecoverySupport=()=>{}}={}){
+export async function uploadProjectFile(file,context,send,progress=()=>{},{inspect,signal,current=()=>true,onRecoverySupport=()=>{},requireRecovery=false,intent={},onWarning=()=>{}}={}){
   const check=()=>{signal?.throwIfAborted();if(!current())throw new DOMException('项目或账号已改变，上传已暂停。','AbortError');};
   check();
   if(!validProject(context.project)||context.area!=='code')throw Error('项目只能上传到开发草稿。');
-  if(!Number.isSafeInteger(file.size)||file.size<0||file.size>100*1024*1024)throw Error('网页单文件上限 100 MiB；大文件请用 CLI。');
-  const contents=await file.arrayBuffer();check();if(contents.byteLength!==file.size)throw Error('文件读取长度不一致，请重新选择。');
-  const sha256=[...new Uint8Array(await crypto.subtle.digest('SHA-256',contents))].map(value=>value.toString(16).padStart(2,'0')).join('');
+  if(!Number.isSafeInteger(file.size)||file.size<0||typeof file.slice!=='function')throw Error('文件长度或分块读取能力无效。');
+  if(file.size>LARGE_PERSONAL_FILE_BYTES)onWarning(file.size);
+  const sha256=await hashBlob(file,{signal,onProgress:check});
   check();
   const unsupported=error=>![401,403].includes(error?.status)&&(error?.status===404||['UNSUPPORTED','UNKNOWN_OPERATION'].includes(error?.code)||/unknown operation|unsupported operation|未知操作/i.test(error?.message||''));
   const noRecovery='这台服务器暂不支持续传，请重新上传';
-  const identity={...context,totalSize:file.size,sha256};let uploadId,offset=0,recoveries=0,resumed=false,recoverySupported=false;
+  const identity={...context,totalSize:file.size,sha256},specification=JSON.stringify(identity);
+  if(intent.specification!==undefined&&intent.specification!==specification||intent.uploadId!==undefined&&!uuidPattern.test(intent.uploadId))throw Error('本机文件或原上传身份已改变，保留原操作。');
+  let uploadId=intent.uploadId,offset=0,recoveries=0,resumed=false,recoverySupported=false;
   const unconfirmed=()=>Error('上传结果未确认'+(uploadId?' · '+uploadId:'')+'；重新选择同一文件后点上传，将核对原进度。');
   async function observe(){
     check();const result=await inspect({...identity,...(uploadId?{uploadId}:{})});check();
@@ -155,7 +159,7 @@ export async function uploadProjectFile(file,context,send,progress=()=>{},{inspe
     return result;
   }
   function advance(result){
-    uploadId=result.uploadId;offset=result.state==='COMPLETE'?file.size:result.receivedBytes;resumed=true;
+    uploadId=result.uploadId;Object.assign(intent,{uploadId,specification});offset=result.state==='COMPLETE'?file.size:result.receivedBytes;intent.offset=offset;resumed=true;
     if(result.state==='COMPLETE'&&result.completionPending!==true){progress(offset,file.size,{resumed,uploadId});return true;}
     if(offset)progress(offset,file.size,{resumed,uploadId});return false;
   }
@@ -165,8 +169,11 @@ export async function uploadProjectFile(file,context,send,progress=()=>{},{inspe
     catch(error){check();if(!unsupported(error))throw error;}
   }
   onRecoverySupport(recoverySupported);check();
-  if(!recoverySupported||initial.state==='ABSENT')uploadId=crypto.randomUUID();else if(advance(initial))return {uploadId,complete:true};
-  do{const bytes=new Uint8Array(contents,offset,Math.min(1048576,file.size-offset)),final=offset+bytes.length===file.size;
+  if(requireRecovery&&!recoverySupported)throw Error('节点未确认原上传恢复协议，未发送文件；请核对匹配节点。');
+  if(!recoverySupported||initial.state==='ABSENT')uploadId??=crypto.randomUUID();else if(advance(initial))return {uploadId,complete:true};
+  Object.assign(intent,{uploadId,specification,offset});
+  do{const expected=Math.min(1048576,file.size-offset),bytes=new Uint8Array(await file.slice(offset,offset+expected).arrayBuffer());check();
+    if(bytes.length!==expected)throw Error('文件读取长度不一致；原上传已保留。');const final=offset+bytes.length===file.size;
     check();let receipt;
     try{receipt=await send({...identity,uploadId,offset,data:base64(bytes),final});check();}
     catch(error){
@@ -180,7 +187,7 @@ export async function uploadProjectFile(file,context,send,progress=()=>{},{inspe
     }
     if(final&&(receipt?.complete!==true||receipt.completionPending===true||receipt.size!==file.size||receipt.sha256!==sha256))throw Error('服务器尚未确认完整文件及校验和 · '+uploadId+'；'+(recoverySupported?'重新选择同一文件后继续核对。':noRecovery+'。'));
     if(!final&&(receipt?.complete!==false||receipt.size!==offset+bytes.length)||receipt?.path!==undefined&&receipt.path!==context.path||receipt?.uploadId!==undefined&&receipt.uploadId!==uploadId)throw recoverySupported?unconfirmed():Error('上传结果未确认 · '+uploadId+'；'+noRecovery+'。');
-    offset+=bytes.length;progress(offset,file.size,{resumed,uploadId});
+    offset+=bytes.length;intent.offset=offset;progress(offset,file.size,{resumed,uploadId});
   }while(offset<file.size);
   return {uploadId,complete:true};
 }
@@ -196,7 +203,7 @@ export function executionUI(store,refresh,toast){
   let submitReceipt=null,parsedTarget=null,acceptedDraft=false,managementSubmit=false;
   let projectManagement=null;
   let quotaKey='',quotaState='idle',quotaResult=null,quotaError='',quotaController;
-  let uploadRecovery=null;
+  let uploadRecovery=null;const fileUploadIntents=new Map(),fileDownloadIntents=new Map();
   let datasetReadChoice=null;
   let fileReadController=null,fileReadTurn=0,resultFilePath=null;
   const resultAccess=createJobResultAccess({store,changed:()=>{resultAccess.paint();}});
@@ -399,9 +406,7 @@ export function executionUI(store,refresh,toast){
   function updatePreflight(){
     if(!submitDialog||!actor)return;query('#submit-context').textContent=(machine||'未选择服务器')+' · '+(project||'个人工作区');
     void datasetReadChoice?.sync(datasetReadContext());
-    // The new API does not define a CLI flag yet; never label a cache command
-    // as equivalent to an explicitly selected warehouse submission.
-    query('.submit-cli').hidden=datasetReadChoice?.warehouse()===true;
+    query('.submit-cli').hidden=false;
     const user=store.users.find(item=>item.id===actor),used=store.usage(actor),quota=user?.total,info=currentProject(),host=store.data?.gpuq?.hosts?.find(item=>item.id===machine),fresh=store.production&&!store.data?.gpuq?.stale&&host?.reachable===true;
     const quotaReadout=personalQuotaReadout(user,used,quota);
     const release=query('[name=release]').value,authorized=enabled()&&user?.limits?.[machine]>0,automatic=automaticTraining();
@@ -425,7 +430,12 @@ export function executionUI(store,refresh,toast){
     if(query('[name=custom-policy]').checked){args.push('--rank',get('queue-rank'),'--yield',get('yield-policy'),'--restart-policy',get('restart-policy'));if(query('[name=checkpointable]').checked)args.push('--checkpointable');if(get('request-mode'))args.push('--mode',get('request-mode'));}else if(priorityAvailable())args.push('--priority',get('priority'));
     if(query('[name=elastic]').checked){args.push('--min-cards',get('min-cards'),'--global-batch',get('global-batch'),'--micro-batch',get('micro-batch'));if(query('[name=auto-expand]').checked)args.push('--auto-expand');}
     if(get('gpu-placement')!=='any'){args.push('--gpu',quote(get('gpu-indices')));if(get('gpu-placement')==='shared')args.push('--share','--vram-mib',get('vram-mib'));if(query('[name=hami]').checked)args.push('--hami','--sm-percent',get('sm-percent'));}
-    for(const ref of get('datasets').trim().split(/\s+/).filter(Boolean))args.push('--data',quote(ref));args.push('-- /bin/bash -c',quote(get('command')));query('#submit-command').textContent=args.join(' ');
+    for(const ref of get('datasets').trim().split(/\s+/).filter(Boolean))args.push('--data',quote(ref));
+    if(datasetReadChoice?.warehouse())args.push('--data-read warehouse');
+    args.push('-- /bin/bash -c',quote(get('command')));
+    // AUTO uses the CLI's selected development machine to verify the release.
+    // Pin it explicitly instead of borrowing an unrelated local selection.
+    query('#submit-command').textContent=(automatic?'gpuctl use '+quote(machine)+'\n':'')+args.join(' ');
   }
   function renderJobs(jobs){
     const table=query('#my-job-table'),detailKey=item=>item.className+'|'+(item.closest('[data-workbench-job]')?.dataset.workbenchJob||'')+'|'+(item.querySelector('summary')?.getAttribute('aria-label')||item.querySelector('summary>span')?.textContent||item.querySelector('summary')?.textContent||''),details=new Map([...table.querySelectorAll('details')].map(item=>[detailKey(item),item.open])),scrolls=new Map([...table.querySelectorAll('.wb-scroll-list')].map(item=>[item.getAttribute('aria-label'),item.scrollTop])),active=document.activeElement,focus=table.contains(active)?{id:active.closest('[data-workbench-job]')?.dataset.workbenchJob,hook:[...active.attributes].find(attr=>attr.name.startsWith('data-'))?.name}:null;
@@ -476,7 +486,7 @@ export function executionUI(store,refresh,toast){
     const automatic=automaticTraining(),target=query('[name=training-target]');target.disabled=!available||locked;
     target.querySelector('[value=auto]').disabled=info?.environmentMode!=='oci';
     query('[name=training-candidates]').disabled=!automatic||locked;query('#training-candidates-field').hidden=!automatic;
-    query('#training-target-note').textContent=automatic?'从授权兼容服务器中优先选空闲卡；先准备固定项目版本和数据，再排队。开发终端不搬迁，任务选定后不自动改派。':'在当前服务器自动分配显卡；不搬运项目或切换服务器。';
+    query('#training-target-note').textContent=automatic?(query('[name=datasets]').value.trim()?'选择已有所选数据的兼容服务器。':'自动选择兼容服务器。'):'在当前服务器自动分配显卡。';
     const capacity=automatic?Math.max(1,...(store.data?.machines||[]).filter(m=>trainingHosts().some(h=>h.id===m.id)).map(m=>m.cards||1)):(store.data?.machines||[]).find(m=>m.id===machine)?.cards||1;
     query('[name=cards]').max=String(capacity);
     const custom=query('[name=custom-policy]'),customOn=custom.checked;
@@ -698,13 +708,22 @@ export function executionUI(store,refresh,toast){
     if(button.id==='workspace-list')guarded(button,listFiles);
     if(button.id==='workspace-upload')guarded(button,async()=>{
       const target=fileContext(),token=currentToken(),dir=query('[name=file-path]').value||'.',files=[...query('[name=files]').files];if(target.area==='output')throw Error('任务输出只支持查看和下载。');if(!files.length)throw Error('先选择文件。');
+      if(!target.project)throw Error('校园文件上传须先选择个人项目；原个人工作区不会经 VPS 中转。');
       query('#workspace-result').textContent='正在核对上传…';
-      for(const file of files){const path=dir==='.'?file.name:dir+'/'+file.name,progress=(offset,total,info)=>{if(token===currentToken())query('#workspace-result').textContent=`${info?.resumed?'接着上传':'正在上传'} ${file.name}：${offset} / ${total??file.size} B`;};
-        if(target.project){
-          try{await projectActivity.run(signal=>uploadProjectFile(file,{...target,path},args=>store.call('files.put',args,{signal}),progress,{inspect:args=>store.call('files.upload.status',args,{signal}),signal,current:()=>token===currentToken(),onRecoverySupport:supported=>{if(token===currentToken()){uploadRecovery={scope:uploadScope(),supported};updateControls();}}}));}
-          catch(error){if(token===currentToken())query('#workspace-result').textContent=error.message;throw error;}
-        }
-        else{let offset=0;do{const bytes=new Uint8Array(await file.slice(offset,offset+1048576).arrayBuffer());if(token!==currentToken())throw new DOMException('项目或账号已改变，上传已暂停。','AbortError');await call('files.put',{...target,path,offset,truncate:offset===0,data:base64(bytes)});offset+=bytes.length;progress(offset);}while(offset<file.size);}}
+      for(const file of files){const path=dir==='.'?file.name:dir+'/'+file.name,key=JSON.stringify([receiptActor(),target,path]);let warning='';
+        const intent=fileUploadIntents.get(key)||{};fileUploadIntents.set(key,intent);
+        const progress=(offset,total,info)=>{if(token===currentToken())query('#workspace-result').textContent=warning+`${info?.resumed?'接着上传':'正在上传'} ${file.name}：${offset} / ${total??file.size} B`;};
+        try{await projectActivity.run(async signal=>{
+          let transport;const current=()=>token===currentToken();
+          try{return await uploadProjectFile(file,{...target,path},async args=>{
+            transport??=await createPersonalFileTransport((op,args,options)=>store.call(op,args,options),{machine:target.machine,context:{project:target.project,area:'code'},path,action:'put',identity:{uploadId:args.uploadId,totalSize:args.totalSize,sha256:args.sha256},signal,current});
+            return transport.request({offset:args.offset,final:args.final,bytes:Uint8Array.from(atob(args.data),char=>char.charCodeAt(0))});
+          },progress,{inspect:args=>store.call('files.upload.status',args,{signal}),signal,current,intent,requireRecovery:true,
+            onWarning:()=>{warning='大文件仍可分块上传；请留足磁盘空间。\n';if(current())query('#workspace-result').textContent=warning+'正在核对上传…';},
+            onRecoverySupport:supported=>{if(current()){uploadRecovery={scope:uploadScope(),supported};updateControls();}}});}
+          finally{transport?.close();}
+        });fileUploadIntents.delete(key);}
+        catch(error){if(token===currentToken())query('#workspace-result').textContent=error.message+(intent.uploadId?'\n原上传：'+intent.uploadId:'');throw error;}}
       if(token!==currentToken())return;
       query('#workspace-result').textContent=`已上传 ${files.length} 个文件${project?'到项目开发草稿；生成训练版本后才能用于训练。':'。'}`;renderProject();toast('文件上传完成。');
     },true);
@@ -717,11 +736,26 @@ export function executionUI(store,refresh,toast){
     }
     if(button.id==='workspace-pull-command'){const job=resultJob();if(!job||!resultFilePath||query('[name=file-path]').value!==resultFilePath)return;navigator.clipboard.writeText(resultPullCommand(job,resultFilePath)).then(()=>toast('CLI 命令已复制。'),()=>toast('复制失败。'));return;}
     if(button.id==='workspace-download')guarded(button,async()=>{
-      const target=fileContext(),path=query('[name=file-path]').value,token=currentToken(),turn=fileReadTurn;if(!path||path==='.')throw Error('请填入要下载的文件相对路径。');let offset=0;const chunks=[];
+      const target=fileContext(),path=query('[name=file-path]').value,token=currentToken(),owner=receiptActor();
+      if(!path||path==='.')throw Error('请填入要下载的文件相对路径。');if(!target.project)throw Error('校园下载须选择原个人项目；不会使用 VPS 文件中转。');
+      fileReadTurn++;fileReadController?.abort();const turn=fileReadTurn,controller=new AbortController();fileReadController=controller;
+      const current=()=>token===currentToken()&&turn===fileReadTurn&&owner===receiptActor(),check=()=>{controller.signal.throwIfAborted();if(!current())throw new DOMException('文件上下文已改变，下载已暂停。','AbortError');};
       query('#workspace-result').hidden=false;
       query('#workspace-result').textContent=`正在核对下载 ${path}…`;
-      while(true){const result=await call('files.get',{...target,path,offset});if(token!==currentToken()||turn!==fileReadTurn)return;const bytes=Uint8Array.from(atob(result.data),char=>char.charCodeAt(0));chunks.push(bytes);offset+=bytes.length;query('#workspace-result').textContent=`正在下载 ${path}：${offset} B`;if(offset>100*1024*1024)throw Error('超过 100 MiB，请用 CLI 下载大文件。');if(result.eof)break;if(!bytes.length)throw Error('下载没有继续返回数据，请重试。');}
-      const url=URL.createObjectURL(new Blob(chunks)),anchor=document.createElement('a');anchor.href=url;anchor.download=path.split('/').pop();anchor.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+      const key=JSON.stringify([owner,target,path]),state=fileDownloadIntents.get(key)||{};fileDownloadIntents.set(key,state);let writer,warning='';const streaming=typeof window.showSaveFilePicker==='function';
+      try{
+        if(state.localUnconfirmed)throw Error('本地下载保存未确认；原文件保留，请先核对，未继续写入。');
+        if(streaming){
+          state.handle??=await window.showSaveFilePicker({suggestedName:path.split('/').pop()});check();
+          if(state.offset){const local=await state.handle.getFile();check();if(local.size!==state.offset||await hashBlob(local,{signal:controller.signal,onProgress:check})!==state.prefixSha256)throw Error('本地下载片段已改变；原文件保留，未覆盖或续写。');check();}
+        }else state.chunks??=[];
+        const result=await downloadPersonalFile((op,args,options)=>store.call(op,args,options),{machine:target.machine,context:{project:target.project,area:target.area||'code',...(target.runId?{runId:target.runId}:{})},path,actor:owner,state,signal:controller.signal,current,
+          write:async(bytes,offset)=>{check();if(streaming){writer??=await state.handle.createWritable({keepExistingData:!!state.offset});check();await writer.write({type:'write',position:offset,data:bytes});}else state.chunks.push(bytes);},
+          onWarning:()=>{warning=streaming?'大文件直接保存到所选文件。\n':'大文件会暂存浏览器内存；仍可继续下载。\n';},onProgress:value=>{check();query('#workspace-result').textContent=warning+`正在下载 ${path}：${value.bytes} / ${value.totalBytes} B`;}});
+        check();if(writer){const finalWriter=writer;writer=null;try{await finalWriter.close();}catch(error){state.localUnconfirmed=true;await finalWriter.abort().catch(()=>{});throw Error('本地下载保存未确认；原文件保留，未继续写入。',{cause:error});}check();}else{const url=URL.createObjectURL(new Blob(state.chunks)),anchor=document.createElement('a');anchor.href=url;anchor.download=path.split('/').pop();anchor.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
+        fileDownloadIntents.delete(key);
+      }catch(error){if(current())query('#workspace-result').textContent=error.message+(state.fingerprint?'\n已确认 '+(state.offset||0)+' B；原片段保留。':'');throw error;}
+      finally{if(writer)try{if(state.offset){await writer.truncate(state.offset);await writer.close();}else await writer.abort();}catch{state.localUnconfirmed=true;await writer.abort().catch(()=>{});if(current())query('#workspace-result').textContent='本地下载保存未确认；原文件保留，未继续写入。';}if(fileReadController===controller)fileReadController=null;}
     });
     if(button.dataset.jobPull)guarded(button,async()=>{const job=ownJobs().find(row=>row.id===button.dataset.jobPull);if(!job||!await resultAccess.check(job,true))throw Error('任务完成状态未确认，请核验完成后再试。');if(store.principal?.userId!==job.userId)return;await diagnostics.openLogs(job.id,'output');});
     if(button.dataset.jobOutput)guarded(button,()=>diagnostics.openLogs(button.dataset.jobOutput,'output'));
@@ -838,8 +872,9 @@ export function executionUI(store,refresh,toast){
 
   const render=()=>{
     if(!section){section=document.createElement('section');section.id='execution-workspace';section.className='execution-workspace';document.querySelector('#execution-host').append(section);log=document.createElement('dialog');log.className='job-log-dialog';log.setAttribute('aria-labelledby','job-log-title');log.innerHTML='<div class="modal-head"><h2 id="job-log-title">训练日志 · 最近 200 行</h2><button class="button" id="close-job-log">关闭</button></div><pre></pre>';document.body.append(log);diagnostics.install();}
-    diagnostics.sync();mission.sync();renderReceipt();section.hidden=!store.principal;if(section.hidden){diagnostics.reset();submitDialog?.close();settingsDialog?.close();submitReceipt=null;parsedTarget=null;acceptedDraft=false;actor=null;machine='';project='';catalog=[];catalogError='';epoch++;stopPolling();section.innerHTML='';notifyContext();return;}
+    diagnostics.sync();mission.sync();renderReceipt();section.hidden=!store.principal;if(section.hidden){stopFileRead();fileUploadIntents.clear();fileDownloadIntents.clear();diagnostics.reset();submitDialog?.close();settingsDialog?.close();submitReceipt=null;parsedTarget=null;acceptedDraft=false;actor=null;machine='';project='';catalog=[];catalogError='';epoch++;stopPolling();section.innerHTML='';notifyContext();return;}
     if(actor!==store.principal.userId){
+      stopFileRead();fileUploadIntents.clear();fileDownloadIntents.clear();
       diagnostics.reset();
       submitDialog?.close();submitDialog?.remove();settingsDialog?.close();settingsDialog?.remove();submitDialog=null;settingsDialog=null;settingsSource=null;jobHTML='';lastJobs.clear();liveJobs.clear();focusedJob=null;historyState='';deepLinkHandled=false;
       submitReceipt=null;parsedTarget=null;acceptedDraft=false;managementSubmit=false;actor=store.principal.userId;machine='';focusMachine='';project='';catalog=[];directory.clear();directoryOwner='';directoryError='';catalogError='';epoch++;stopPolling();machineIdentity='';submitKey=crypto.randomUUID();operationBusy=false;projectBusy=false;

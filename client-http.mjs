@@ -1,11 +1,13 @@
 // Retry only explicitly read-only operations. A lost mutation response is not
 // proof of failure and must never cause an implicit second submission.
 const READS=new Set(['state','datasets.list','datasets.status','datasets.catalog','projects.list','projects.status','projects.verify','projects.local-import.status','projects.label.get','projects.group.get','projects.catalog','projects.retire.plan','projects.retire.status','files.get','files.list','files.upload.status','files.upload.list','host.status','jobs.logs','jobs.watch','jobs.diagnostics','jobs.completion','transfers.list','transfers.status','community.posts.list','community.posts.get','community.comments.list']);
+const UPLOAD_READS=new Set(['datasets.upload.status','datasets.upload.routes','datasets.upload.admission.status']);
 const TRANSIENT=new Set([502,503,504]);
 // Cover a short single-instance rollout without a tight polling loop. Queries
 // remain bounded; a mutation is never replayed by this generic transport.
 const READ_RETRY_DELAYS=[500,1000,2000,4000,8000,16000,16000];
-const PROJECT_LOCK_READS=new Set(['projects.status','files.upload.status']);
+const UPLOAD_READ_RETRY_DELAYS=[500,1000,2000,4000,8000,16000,32000];
+const PROJECT_LOCK_READS=new Set(['projects.status','files.upload.status','datasets.upload.status']);
 const PROJECT_LOCK_RETRY_DELAYS=[100,200,400,800,500];
 const projectLockBusy=value=>typeof value==='string'&&/\[Errno 11\] Resource temporarily unavailable/.test(value);
 const safe=value=>String(value).replace(/[\p{Cc}\p{Cf}]/gu,' ').slice(0,600);
@@ -18,23 +20,34 @@ export async function apiPost(base,path,body,{token,signal,fetchImpl=fetch,sleep
   const timer=setTimeout(done,ms);s.addEventListener('abort',abort,{once:true});
 })}={}){
   const target=new URL(`/api/${path}`,base),operation=path==='call'?body?.operation:path;
-  const read=path==='call'&&READS.has(operation);
+  const read=path==='call'&&(READS.has(operation)||UPLOAD_READS.has(operation));
+  const uploadRead=read&&UPLOAD_READS.has(operation);
+  const retryDelays=uploadRead?UPLOAD_READ_RETRY_DELAYS:READ_RETRY_DELAYS;
   const payload=JSON.stringify(body);let lockRetries=0;
-  const deadline=AbortSignal.timeout(read?65000:40000),combined=signal?AbortSignal.any([signal,deadline]):deadline;
+  const deadline=AbortSignal.timeout(uploadRead||operation==='projects.publish'?180000:read?65000:40000),combined=signal?AbortSignal.any([signal,deadline]):deadline;
   for(let attempt=0;;attempt++){
     let response,data,decoded=false;
+    // A stuck first state response must leave time for the existing bounded
+    // read-only backoff. Upload observations retain a 30s per-attempt bound
+    // inside their longer total budget. Only publication has a longer write
+    // deadline; it is still sent exactly once.
+    const attemptMs=uploadRead?30000:operation==='state'&&read?10000:0;
+    const attemptSignal=attemptMs?AbortSignal.any([combined,AbortSignal.timeout(attemptMs)]):combined;
     try{
-      response=await fetchImpl(target,{method:'POST',redirect:'error',signal:combined,
+      response=await fetchImpl(target,{method:'POST',redirect:'error',signal:attemptSignal,
         headers:{'Content-Type':'application/json',...(token?{Authorization:`Bearer ${token}`}:{})},body:payload});
       // Gateways may return an empty or HTML error page. Do not display that
       // untrusted body or misdiagnose every JSON parse failure as a demo URL.
       try{data=await response.json();decoded=!!data&&typeof data==='object'&&!Array.isArray(data);}
       catch(cause){if(!(cause instanceof SyntaxError))throw cause;}
     }catch{
-      if(read&&attempt<READ_RETRY_DELAYS.length&&!combined.aborted){await sleep(READ_RETRY_DELAYS[attempt],combined);continue;}
+      if(read&&attempt<retryDelays.length&&!combined.aborted){await sleep(retryDelays[attempt],combined);continue;}
       throw error(`${safe(operation)}：${combined.aborted?'请求已取消或超时':'网络连接中断'}。${read?'稍后重试查询。':'操作结果尚未确认，请先查询状态；不要更换提交键重复提交。'}`);
     }
-    if(read&&TRANSIENT.has(response.status)&&attempt<READ_RETRY_DELAYS.length&&!combined.aborted){await sleep(READ_RETRY_DELAYS[attempt],combined);continue;}
+    // A timed-out read can leave the original node observation in its bounded
+    // server lane briefly. Reobserve the same UUID after its 429 busy reply;
+    // writes and other authoritative refusals never enter this retry path.
+    if(read&&(TRANSIENT.has(response.status)||uploadRead&&response.status===429)&&attempt<retryDelays.length&&!combined.aborted){await sleep(retryDelays[attempt],combined);continue;}
     // Old nodes flatten flock EAGAIN into HTTP 400. Only observe the original
     // project/upload identity again; file writes and publication never replay.
     if(read&&PROJECT_LOCK_READS.has(operation)&&response.status===400&&decoded&&projectLockBusy(data.error)

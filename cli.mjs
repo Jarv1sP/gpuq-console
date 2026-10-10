@@ -18,7 +18,13 @@ import {progressText,jobTimingText} from './dist/job-progress.js';
 import {elasticAllocation,allocationLabel,gpuPlacement} from './dist/gpu-allocation.js';
 import {displayName,taskDescription} from './dist/task-metadata.js';
 import {apiPost} from './client-http.mjs';
-import {downloadFile} from './client-file-download.mjs';
+import {readCLIState} from './client-state.mjs';
+import {publishProject,requestProjectPublication,publicationUnconfirmed} from './client-project-publication.mjs';
+import {defaultPlatformControlTransport,finishPlatformControlTransport} from './client-windows-control.mjs';
+import {createDatasetHashJournal,originalDatasetUploadId} from './client-dataset-hash-journal.mjs';
+import {createPersonalFileTransport,downloadCampusFile,recoverablePersonalFileFailure} from './client-personal-file-campus.mjs';
+import {finishCampusOperation} from './client-campus-endpoints.mjs';
+import {getWorkspaceData} from './client-workspace-download.mjs';
 
 // Member metadata is untrusted even after submission validators improve: old
 // stored records and older servers can still contain C1/ANSI or bidi controls.
@@ -52,6 +58,9 @@ function fail(message){throw Error(message);}
 const CLI_OPTIONS=new Map([
   ['pin','flag'],...['kind','status','title','body','body-file','announcement-type'].map(key=>[key,'value']),
   ['via','value'],['data-read','value'],
+  ['inherit-release','value'],
+  ['receipt-sha256','value'],
+  ['path','value'],['path-prefix','value'],
   ...['sha256','file-id','password-code','source-url'].map(key=>[key,'value']),
   ...['overwrite','json','password-stdin','credentials-stdin','help','full','root','legacy','detach','takeover','general','checkpointable','auto-expand','dry-run','share','hami','ack-unknown','sync','data-workspace'].map(key=>[key,'flag']),
   ['sync-dir','value'],['candidates','value'],['owner-id','value'],
@@ -76,7 +85,8 @@ export function parseCLIOptions(argv){
   }
   return {options,positionals,training:[]};
 }
-export async function uploadCodeFiles(call,{machine,context,local,remote,verifyTree=false,inspectOnly=false,progress=message=>process.stderr.write(message),recoverySleep=ms=>new Promise(resolve=>setTimeout(resolve,ms))}){
+export async function uploadCodeFiles(call,{machine,context,local,remote,verifyTree=false,inspectOnly=false,progress=message=>process.stderr.write(message),recoverySleep=ms=>new Promise(resolve=>setTimeout(resolve,ms)),transportFactory=createPersonalFileTransport,resumeCommand}){
+  if(!context.project)fail('Campus push requires a selected personal project; legacy VPS file relay is unavailable');
   let count=0,skipped=0;const observed=[],files=[],statuses=[];
   if(inspectOnly&&!context.project)fail('push-status requires a selected personal project');
   const excluded=name=>['.git','.ssh','.aws','.azure','.venv','venv','node_modules','__pycache__','id_rsa','id_ed25519','.env'].includes(name)||(name.startsWith('.env.')&&name!=='.env.example');
@@ -92,12 +102,20 @@ export async function uploadCodeFiles(call,{machine,context,local,remote,verifyT
     if(!st.isFile())fail('Only regular files/directories can be uploaded');
     if(!Number.isSafeInteger(st.size)||st.size<0)fail('File byte count cannot be represented exactly');
     if(context.project&&st.size>4*1024**3)console.error('项目文件超过 4 GiB，仍允许上传；请确认磁盘空间，并等待完整校验。');
-    const file=await open(local,'r');let offset=0;
+    const file=await open(local,'r');let offset=0,transport,identity={};
     try{
       const initial=await file.stat();if(!initial.isFile()||!stable(st,initial))fail('Local file changed before upload');
-      let identity={},confirmed=false,recoveries=0;
-      const inspectUpload=async()=>{
-        const value=(await call('files.upload.status',{machine,path,...context,...identity})).result;
+      let confirmed=false,recoveries=0,recoveryDeadline;
+      const inspectUpload=async(signal,retryUntil)=>{
+        let value;
+        for(let attempt=0;;attempt++){
+          try{value=(await call('files.upload.status',{machine,path,...context,...identity},signal)).result;break;}
+          catch(error){
+            const delay=Math.min(16000,1000*2**attempt);
+            if(!retryUntil||signal?.aborted||!recoverablePersonalFileFailure(error)||attempt>=6||Date.now()+delay>=retryUntil)throw error;
+            await recoverySleep(delay);
+          }
+        }
         if(value?.protocol!==2||!['ABSENT','UPLOADING','COMPLETE','CONFLICT'].includes(value.state)||value.path!==path)fail('Server did not confirm the project upload recovery protocol; no file was resent');
         if(['UPLOADING','COMPLETE'].includes(value.state)){
           if(value.sha256!==identity.sha256||value.totalSize!==identity.totalSize||!Number.isSafeInteger(value.receivedBytes)||value.receivedBytes<0||value.receivedBytes>identity.totalSize||!(/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/).test(value.uploadId)||identity.uploadId&&value.uploadId!==identity.uploadId)fail('Project upload status identity differs; no file was resent');
@@ -120,39 +138,56 @@ export async function uploadCodeFiles(call,{machine,context,local,remote,verifyT
         else identity.uploadId=randomUUID();
         if(offset)progress(`项目文件 ${maintenanceVisible(path)}：已确认 ${offset}/${initial.size} 字节${confirmed?'（完整校验）':'，续传原上传'}\n`);
       }
+      if(!confirmed)transport=await transportFactory(call,{machine,context,path,action:'put',identity});
       if(!confirmed)do{
-        const buffer=Buffer.alloc(1024*1024);const {bytesRead}=await file.read(buffer,0,Math.min(buffer.length,Math.max(0,initial.size-offset)),offset);
+        const chunkBytes=transport.chunkBytes??1024*1024;
+        if(![1024*1024,16*1024*1024].includes(chunkBytes))fail('Invalid authenticated upload chunk bound');
+        const buffer=Buffer.alloc(chunkBytes);const {bytesRead}=await file.read(buffer,0,Math.min(buffer.length,Math.max(0,initial.size-offset)),offset);
         if(!bytesRead&&offset<initial.size)fail('Local file changed during upload');
+        if(!stable(initial,await file.stat()))fail('Local file changed during upload; original partial preserved');
         const final=offset+bytesRead===initial.size;
         if(context.project&&final&&!stable(initial,await file.stat()))fail('Local file changed during upload; no final publish was sent');
         let response;
-        try{response=(await call('files.put',{machine,path,offset,...context,...(context.project?{...identity,final}:{truncate:offset===0}),data:buffer.subarray(0,bytesRead).toString('base64')})).result;}
+        try{response=await transport.request({offset,final,bytes:buffer.subarray(0,bytesRead)});}
         catch(error){
           // Only this fixed, checksum-bound project protocol can recover an
           // uncertain write. Legacy uploads and other mutations never replay.
-          if(!context.project||error.status!==undefined&&![502,503,504].includes(error.status)||recoveries>=3)throw error;
-          await recoverySleep(1000*2**recoveries++);
+          if(!context.project||!recoverablePersonalFileFailure(error)||recoveries>=10)throw error;
+          recoveryDeadline??=Date.now()+120000;
+          const delay=Math.min(16000,1000*2**recoveries++);
+          if(Date.now()+delay>=recoveryDeadline)throw error;
+          await recoverySleep(delay);
           if(!stable(initial,await file.stat()))fail('Local file changed after an interrupted upload; no retry was sent');
-          const current=await inspectUpload();
+          const current=await inspectUpload(AbortSignal.timeout(Math.max(1,recoveryDeadline-Date.now())),recoveryDeadline);
           if(current.state==='COMPLETE'){
             offset=initial.size;
             if(current.completionPending!==true){confirmed=true;break;}
-            // The bytes were verified, but the completion journal still
-            // blocks publication. Send only the same-ID zero-byte final.
-            continue;
           }
           if(current.state==='CONFLICT'||current.state==='ABSENT'&&offset!==0||current.state==='UPLOADING'&&(current.resumable!==true||current.receivedBytes<offset||current.receivedBytes>offset+bytesRead))throw Error('Upload outcome is not safely resumable; keep the same source and target and inspect upload status');
-          offset=current.state==='UPLOADING'?current.receivedBytes:0;
+          offset=current.state==='COMPLETE'?initial.size:current.state==='UPLOADING'?current.receivedBytes:0;
+          // A stopped native helper cannot be reused. Only recreate it after
+          // the node has confirmed this exact UUID/SHA and an admissible offset.
+          const fixedRoute=transport.routeIdentity,preferredEndpoint=transport.selectedEndpoint;
+          await transport.close();transport=undefined;
+          transport=await transportFactory(call,{machine,context,path,action:'put',identity,fixedRoute,preferredEndpoint,
+            authorizationDeadline:recoveryDeadline/1000});
           progress(`项目文件 ${maintenanceVisible(path)}：连接恢复，服务器确认 ${offset}/${initial.size} 字节；保持原上传身份\n`);
           continue;
         }
         if(context.project&&final&&(response?.complete!==true||response.completionPending===true||response.sha256!==identity.sha256||response.size!==identity.totalSize))fail('Server did not confirm the complete verified upload; check and retry this file before publishing');
         offset+=bytesRead;
-        confirmed=final;
+        confirmed=final;recoveries=0;recoveryDeadline=undefined;
       }while(!confirmed);
       if(context.project&&!stable(initial,await file.stat()))fail('Local file changed during upload; verify and upload again before project publish');
       if(verifyTree){observed.push({local,st:initial});files.push({path,size:identity.totalSize,sha256:identity.sha256});}
-    }finally{await file.close();}count++;
+    }catch(error){
+      if(identity.uploadId){
+        const quote=value=>process.platform==='win32'?"'"+String(value).replaceAll("'","''")+"'":"'"+String(value).replaceAll("'","'\"'\"'")+"'";
+        const command=resumeCommand??`gpuctl push ${quote(local)} ${quote(path)} --machine ${quote(machine)} --project ${quote(context.project)}`;
+        progress(`原上传 UUID：${identity.uploadId}；已确认偏移 ${offset}/${identity.totalSize}。保留来源和目标，续传命令：${maintenanceVisible(command)}\n`);
+      }
+      throw error;
+    }finally{try{await finishCampusOperation(()=>transport?.close());}finally{await file.close();}}count++;
   }
   await upload(local,remote);
   if(inspectOnly)return {machine,project:context.project,readOnly:true,files:statuses,skipped};
@@ -166,16 +201,15 @@ export async function uploadCodeFiles(call,{machine,context,local,remote,verifyT
   return {uploaded:count,machine,...(context.project?{project:context.project,skipped}:{}),...(verifyTree?{files}:{})};
 }
 
-export async function synchronizeProjectRun(call,{machine,project,directory=process.cwd(),key=randomUUID(),timeoutMs=7200000,pollMs=1000,progress=message=>process.stderr.write(message)}){
+export async function synchronizeProjectRun(call,{machine,project,directory=process.cwd(),key=randomUUID(),timeoutMs=7200000,pollMs=1000,progress=message=>process.stderr.write(message),transportFactory=createPersonalFileTransport,savePublication}){
   const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),timeoutMs);
   const request=async(operation,args={})=>(await call(operation,{machine,project,...args},controller.signal)).result;
   try{
     const before=await request('projects.status');
     if(before?.publicationProtocol!==1)fail('Node does not support confirmed run --sync publications; upgrade it first. No code was uploaded.');
     if(!['READY','DRAFT','FAILED'].includes(before.state))fail('Project is busy or its publication outcome is unknown; inspect project status before syncing');
-    const uploaded=await uploadCodeFiles((op,args)=>call(op,args,controller.signal),{machine,context:{project,area:'code'},local:directory,remote:'.',verifyTree:true,progress});
-    progress(`Publication key: ${key}\n同步不会删除服务器多余文件；等待本次发布 READY。\n`);
-    let result=await request('projects.publish',{key});
+    const uploaded=await uploadCodeFiles((op,args,signal)=>call(op,args,signal?AbortSignal.any([controller.signal,signal]):controller.signal).catch(error=>{if(controller.signal.aborted)throw controller.signal.reason;throw error;}),{machine,context:{project,area:'code'},local:directory,remote:'.',verifyTree:true,progress,transportFactory});
+    let result=await requestProjectPublication(call,{machine,project,key},{signal:controller.signal,progress,saveIntent:savePublication});
     while(true){
       const proof=result?.publication;
       if(result?.publicationProtocol!==1||proof?.id!==key)fail('This publication was not confirmed or was replaced; no job was submitted');
@@ -194,11 +228,11 @@ export async function synchronizeProjectRun(call,{machine,project,directory=proc
       }
       if(proof.state!=='PUBLISHING'||result.state!=='PUBLISHING')fail(`Publication ${proof.state||'UNKNOWN'}; no job was submitted and no older release was used. Inspect gpuctl project status.`);
       await new Promise((resolve,reject)=>{
-        const abort=()=>{clearTimeout(wait);reject(Error('Publication wait timed out; no job was submitted'));};
+        const abort=()=>{clearTimeout(wait);reject(publicationUnconfirmed({machine,project,key}));};
         const wait=setTimeout(()=>{controller.signal.removeEventListener('abort',abort);resolve();},pollMs);
         controller.signal.addEventListener('abort',abort,{once:true});if(controller.signal.aborted)abort();
       });
-      result=await request('projects.status');
+      result=await request('projects.status').catch(()=>{throw publicationUnconfirmed({machine,project,key});});
     }
   }finally{clearTimeout(timer);}
 }
@@ -219,13 +253,14 @@ async function main(){
     if(positionals.length>2||training.length)fail('Usage: gpuctl help [daily|admin|community]');
     console.log(cliHelp(positionals[1]));return;
   }
-  if(options.help||!positionals.length){console.log(cliHelp());return;}
+  if(options.help||!positionals.length){console.log(cliHelp(positionals[0]==='community'?'community':undefined));return;}
   if(positionals[0]!=='run'&&options.machines.includes('auto'))fail('开发容器需要指定服务器；自动选择只用于提交训练（gpuctl run --machine auto）');
   if(options.sync&&positionals[0]!=='run'||options['sync-dir']!==undefined&&!options.sync)fail('--sync is only for run; --sync-dir requires run --sync');
   if(options.sync&&['release','legacy','root','as','job'].some(key=>Object.hasOwn(options,key)))fail('run --sync requires a personal project; cannot combine with --release/--legacy/--root/--as/--job');
   const transferCopy=positionals[0]==='transfer'&&positionals[1]==='copy',projectCopy=positionals[0]==='project'&&positionals[1]==='copy',transferWatch=positionals[0]==='transfer'&&positionals[1]==='watch',transferList=positionals[0]==='transfer'&&positionals[1]==='list';
   const datasetLabel=positionals[0]==='data'&&positionals[1]==='label';
   const projectLifecycle=positionals[0]==='project'&&['label','group','archive','unarchive','retire'].includes(positionals[1]);
+  const projectUploads=positionals[0]==='project'&&positionals[1]==='uploads';
   if(['ref','target-project','dry-run'].some(key=>Object.hasOwn(options,key))&&positionals[0]!=='sync'||['from','to'].some(key=>Object.hasOwn(options,key))&&positionals[0]!=='sync'&&!transferCopy&&!projectCopy)fail('--from/--to are for sync, project copy or transfer copy; ref/target-project/dry-run are only for sync');
   if(options.candidates!==undefined&&positionals[0]!=='run')fail('--candidates is only for run --machine auto');
   if(options.general&&positionals[0]!=='note')fail('--general is only valid for note');
@@ -236,12 +271,14 @@ async function main(){
   }
   if(positionals[0]==='notify'&&(positionals.length!==3||!['on','off','status'].includes(positionals[2])||training.length||options.machines.length||options.datasets.length||Object.keys(options).some(k=>!['machines','datasets','json','url','session-file'].includes(k))))fail('Usage: notify JOB on|off|status');
   if(options.overwrite&&!(positionals[0]==='data'&&positionals[1]==='put'))fail('--overwrite is only valid for data put');
-  if(options.via!==undefined&&(!((['data','transfer'].includes(positionals[0])&&positionals[1]==='upload')||(positionals[0]==='data'&&positionals[1]==='put'&&options.via!=='direct'))||!['auto','direct','relay'].includes(options.via)))fail('--via auto|direct|relay is for directory uploads; data put accepts only auto or relay');
+  if(options.via!==undefined&&(!((['data','transfer'].includes(positionals[0])&&positionals[1]==='upload')||(positionals[0]==='data'&&positionals[1]==='put'))||!['auto','direct','relay',...(positionals[0]==='data'&&['upload','put'].includes(positionals[1])?['campus']:[])].includes(options.via)))fail('--via auto|direct|campus selects data campus transport; relay is disabled for file bytes');
   if(options.priority&&!['idle','normal','high'].includes(options.priority))fail('Priority must be idle, normal or high');
   if(options.priority&&positionals[0]!=='run')fail('--priority is only valid for run; use gpuctl priority JOB idle|normal|high');
   if(options.cwd!==undefined&&!['exec','maintenance'].includes(positionals[0])||options.timeout!==undefined&&!['exec','maintenance'].includes(positionals[0])&&!transferCopy||options.detach&&positionals[0]!=='exec'&&!transferCopy)fail('--cwd is for exec/maintenance; timeout also supports transfer copy; detach is for exec or transfer copy');
   if(['reason','script-file','preview-token','parent','ack-unknown'].some(key=>Object.hasOwn(options,key))&&positionals[0]!=='maintenance')fail('Maintenance options are only valid for maintenance');
-  if(options.revision!==undefined&&!['maintenance','community'].includes(positionals[0])&&!datasetLabel&&!projectLifecycle&&!(positionals[0]==='task-label'&&positionals[1]==='set')||['cursor','limit'].some(key=>Object.hasOwn(options,key))&&!['maintenance','community'].includes(positionals[0])&&!transferList)fail('--revision is for community/maintenance/data label/project lifecycle/task-label set; cursor/limit also support transfer list');
+  if(options.revision!==undefined&&!['maintenance','community'].includes(positionals[0])&&!datasetLabel&&!projectLifecycle&&!(positionals[0]==='task-label'&&positionals[1]==='set')||['cursor','limit'].some(key=>Object.hasOwn(options,key))&&!['maintenance','community','files'].includes(positionals[0])&&!transferList&&!projectUploads)fail('--revision is for community/maintenance/data label/project lifecycle/task-label set; cursor/limit also support transfer list, files and project uploads');
+  if(positionals[0]==='files'&&options.limit!==undefined&&(!/^\d+$/.test(options.limit)||Number(options.limit)<1||Number(options.limit)>1000))fail('files --limit must be 1..1000');
+  if(positionals[0]==='files'&&options.cursor!==undefined&&!/^[A-Za-z0-9_-]{1,4096}$/.test(options.cursor))fail('files --cursor must be the exact nextCursor from the same directory');
   const customScheduling=['rank','yield','restart-policy','checkpointable','mode'].some(k=>Object.hasOwn(options,k));
   if(customScheduling&&(positionals[0]!=='run'||options.priority))fail('Custom scheduling is only valid for run and cannot mix with --priority presets');
   const scheduling=customScheduling?{rank:options.rank||'P2',yieldPolicy:options.yield||'never',restartPolicy:options['restart-policy']||'never',checkpointable:options.checkpointable===true}:null;
@@ -276,8 +313,10 @@ async function main(){
   if(base.username||base.password||base.pathname!=='/'||base.search||base.hash)fail('Use a base URL without credentials, path or query.');
   if(base.protocol!=='https:'&&!(base.protocol==='http:'&&base.hostname==='127.0.0.1'))fail('Remote APIs require HTTPS.');
   if(session&&session.url!==base.origin)session=undefined;
+  const controlTransport=await defaultPlatformControlTransport(base);
+  try {
   async function post(path,body,requestSignal){
-    return apiPost(base,path,body,{token:session?.token,signal:requestSignal});
+    return apiPost(base,path,body,{token:session?.token,signal:requestSignal,fetchImpl:controlTransport.fetchImpl});
   }
   const call=(operation,args={},signal)=>post('call',{operation,args},signal);
   let command=positionals[0];let result,mode={demo:true,gpuqConnected:false};
@@ -299,7 +338,7 @@ async function main(){
     result={loggedIn:true,principal:login.principal};
   }else{
     if(!session)fail('请先登录：gpuctl login');
-    const state=(await call('state')).state;
+    const state=await readCLIState(call,command);
     const machineName=value=>{const exact=state.machines.find(m=>m.id===value);if(exact)return exact.id;const short=state.machines.filter(m=>m.id.endsWith('-'+value));return short.length===1?short[0].id:value;};
     const selectedMachine=()=>session.machine||(state.machines?.length===1?state.machines[0].id:null)||fail('先选择一次服务器：gpuctl use MACHINE_ID');
     const defaultMachine=()=>{if(options.machines.length){if(options.machines.length!==1||options.machines[0].includes('='))fail('Use one --machine SERVER outside grant');return machineName(options.machines[0]);}return selectedMachine();};
@@ -307,7 +346,12 @@ async function main(){
     const projectArgs=machine=>{const project=selectedProject(machine);return project?{project:projectSlug(project)}:{};};
     const fileArgs=machine=>{const context=projectArgs(machine);if(options.job&&!context.project)fail('--job outputs require a selected project; use gpuctl project use NAME');return {...context,...(context.project?{area:options.job?'output':'code',...(options.job?{runId:options.job}:{})}:{})};};
     const saveSession=async()=>{await writeFile(sessionFile,JSON.stringify(session),{mode:0o600});await chmod(sessionFile,0o600);};
+    const savePublication=async intent=>{
+      session.publicationsByMachine={...session.publicationsByMachine,[intent.machine]:{...intent,requestedAt:new Date().toISOString()}};
+      await saveDatasetUploadSession(sessionFile,session);
+    };
     const shortcut=command;
+    if(options['inherit-release']!==undefined&&(command!=='project'||positionals[1]!=='publish'))fail('--inherit-release 只用于 project publish。');
     const dataTerminal=command==='data'&&positionals[1]==='shell';
     if(dataTerminal){
       if(positionals.length!==2||training.length||options.datasets.length||Object.keys(options).some(k=>!['machines','datasets','url','session-file','json','reconnect','takeover'].includes(k)))fail('Usage: data shell [--machine SERVER] [--reconnect SESSION] [--takeover]');
@@ -497,11 +541,29 @@ async function main(){
       if(['FAILED','CANCELED'].includes(result.state))process.stderr.write('修复原因后可用 gpuctl project copy-retry '+result.id+'；旧操作停止和清理未确认时不会重试。\n');
       if(['FAILED','CANCELED'].includes(result.state))process.exitCode=1;else if(result.state==='UNKNOWN')process.exitCode=3;
     }else if(command==='project'&&['import','import-status','import-cancel','uploads','upload-cancel'].includes(positionals[1])){
-      const action=positionals[1],allowed=['machines','datasets','url','session-file','json','project',...(action==='import'?['key']:[])];
+      const action=positionals[1],allowed=['machines','datasets','url','session-file','json','project',...(action==='import'?['key']:[]),...(action==='upload-cancel'?['receipt-sha256','path']:[]),...(action==='uploads'?['path','path-prefix','cursor','limit']:[])];
       if(training.length||options.datasets.length||options.machines.length>1||Object.keys(options).some(k=>!allowed.includes(k)))fail('Project import accepts one authorized server and your selected project; no host/root or training options');
       const machine=defaultMachine(),project=projectSlug(options.project||selectedProject(machine));
       if(!state.machines.some(m=>m.id===machine))fail('Select an authorized server explicitly');
       const uuid=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
+      const query={};
+      if(options.path!==undefined&&options['path-prefix']!==undefined)fail('Use --path for one exact file or --path-prefix for one directory');
+      for(const [option,field] of [['path','path'],['path-prefix','pathPrefix']])if(options[option]!==undefined){
+        const value=options[option];
+        if(typeof value!=='string'||!value||value.length>1024||value.includes('\\')||/[\p{Cc}\p{Cf}]/u.test(value)||value.split('/').some(p=>!p||p==='.'||p==='..'||p.length>255))fail('Receipt filters require a literal project-relative path');
+        query[field]=value;
+      }
+      if(options.limit!==undefined){if(!/^[0-9]+$/.test(options.limit)||Number(options.limit)<1||Number(options.limit)>64)fail('project uploads --limit must be 1..64');query.limit=Number(options.limit);}
+      if(options.cursor!==undefined){if(!/^[A-Za-z0-9_-]{1,4096}$/.test(options.cursor))fail('Use the exact staleReceiptPage.nextCursor');query.cursor=options.cursor;}
+      if(action==='upload-cancel'&&options.path!==undefined&&options['receipt-sha256']===undefined)fail('--path on upload-cancel requires the original --receipt-sha256');
+      const receiptList=async filter=>{
+        const ref={machine,project,area:'code'},first=(await call('files.upload.list',ref)).result;
+        if(!Object.keys(filter).length)return first;
+        if(first?.staleReceiptPaginationProtocol!==1)fail('Node does not support receipt path filtering/pagination; no recovery was attempted');
+        const value=(await call('files.upload.list',{...ref,...filter})).result,page=value?.staleReceiptPage;
+        if(value?.staleReceiptPaginationProtocol!==1||page?.protocol!=='stale-upload-receipt-page-v1'||page.path!==(filter.path??null)||page.pathPrefix!==(filter.pathPrefix??null)||page.limit!==(filter.limit??64))fail('Node did not confirm the requested receipt filter/page');
+        return value;
+      };
       let importRequest=null;
       if(action==='import'){
         if(positionals.length<3||positionals.length>4)fail('Usage: project import SOURCE [DEST] [--key UUID]; both paths are relative, destination must be new');
@@ -513,11 +575,24 @@ async function main(){
         result=(await call('projects.local-import.begin',importRequest)).result;
       }else if(action==='uploads'){
         if(positionals.length!==2)fail('Usage: project uploads');
-        result=(await call('files.upload.list',{machine,project,area:'code'})).result;
+        result=await receiptList(query);
       }else{
         if(positionals.length!==3||!uuid.test(positionals[2]))fail('Use the original full operation UUID');
         const operation=action==='upload-cancel'?'files.upload.cancel':'projects.local-import.'+(action==='import-status'?'status':'cancel');
-        result=(await call(operation,{machine,project,...(action==='upload-cancel'?{area:'code',uploadId:positionals[2]}:{key:positionals[2]})})).result;
+        let recovery={};
+        if(options['receipt-sha256']!==undefined){
+          const receiptSha256=options['receipt-sha256'];
+          if(!/^[a-f0-9]{64}$/.test(receiptSha256))fail('Use the exact receiptSha256 from project uploads');
+          const list=await receiptList(query);
+          const matches=[...(list?.staleReceipts||[]),...(list?.retiredReceipts||[])].filter(row=>row.uploadId===positionals[2]&&row.receiptSha256===receiptSha256);
+          const row=matches[0];
+          if(list?.protocol!==1||list.project!==project||list.staleReceiptRecoveryProtocol!==1||matches.length!==1||
+            !(row.cancelable===true&&row.reasonCode==='COMPLETED_TARGET_MISSING'||row.state==='CANCELED'&&row.metadataOnly===true)||
+            !uuid.test(row.projectUUID||'')||!/^[a-f0-9]{64}$/.test(row.projectGeneration||''))
+            fail('Receipt recovery is not confirmed for this project; no file or receipt changed');
+          recovery={receiptSha256,projectUUID:row.projectUUID,projectGeneration:row.projectGeneration};
+        }
+        result=(await call(operation,{machine,project,...(action==='upload-cancel'?{area:'code',uploadId:positionals[2],...recovery}:{key:positionals[2]})})).result;
       }
       if(action.startsWith('import')){
         const expected=action==='import'?importRequest.key:positionals[2];
@@ -526,6 +601,7 @@ async function main(){
       }else if(action==='uploads'){
         if(result?.protocol!==1||result.project!==project||!Array.isArray(result.uploads)||result.uploads.length>64)fail('Node did not confirm pending upload discovery');
       }else if(result?.protocol!==1||result.uploadId!==positionals[2]||!['CANCELED','ABSENT'].includes(result.state))fail('Node did not confirm exact upload cancellation');
+      if(options['receipt-sha256']!==undefined&&(result.state!=='CANCELED'||result.metadataOnly!==true||result.backupSha256!==options['receipt-sha256']))fail('Original receipt backup was not confirmed; inspect project uploads before retrying');
       result={...result,machine};
       if(result.state==='FAILED'||result.state==='CANCELED'&&action!=='import-cancel'&&action!=='upload-cancel')process.exitCode=1;else if(result.state==='UNKNOWN')process.exitCode=3;
     }else if(command==='project'&&['list','quota','create','use','status','publish'].includes(positionals[1])){
@@ -539,8 +615,19 @@ async function main(){
         if(positionals.length>3)fail('Usage: project create|use NAME | project status|publish [NAME]');
         const project=projectSlug(positionals[2]||options.project||(['status','publish'].includes(action)?selectedProject(machine):null));
         if(positionals[2]&&options.project&&positionals[2]!==options.project)fail('Conflicting project names');
-        if(options.key)fail('--key is for training submissions; publication is tracked per project with project status');
-        result=(await call(`projects.${action==='use'?'status':action}`,{machine,project,...(action==='create'?{environmentMode:'oci'}:{})})).result;
+        const inherit=options['inherit-release'];
+        if(options.key&&action!=='publish')fail('--key is only for publishing or training submissions');
+        let inheritance={};
+        if(inherit!==undefined){
+          if(inherit!=='latest'&&!/^[a-f0-9]{64}$/.test(inherit))fail('--inherit-release 须为完整 READY 版本或 latest。');
+          const key=options.key||randomUUID();
+          if(!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(key))fail('--key must be a UUID');
+          const status=(await call('projects.status',{machine,project})).result;
+          if(status.environmentInheritanceProtocol!==1||status.environmentMode!=='oci')fail('服务器尚未确认环境继承能力；未发布，请先升级对应项目入口。');
+          inheritance={key,inheritRelease:inherit};
+        }
+        result=action==='publish'?await publishProject(call,{machine,project,key:options.key||inheritance.key||randomUUID(),...inheritance},{progress:message=>process.stderr.write(message),saveIntent:savePublication}):
+          (await call(`projects.${action==='use'?'status':action}`,{machine,project,...(action==='create'?{environmentMode:'oci'}:{})})).result;
         if(action==='create'&&(result?.project!==project||result.environmentMode!=='oci'))fail('Node did not confirm the personal container project. Inspect the original project; no fallback or replacement was accepted.');
         if(action==='create'||action==='use'){
           session.projectsByMachine={...session.projectsByMachine,[machine]:project};await saveSession();
@@ -569,15 +656,16 @@ async function main(){
       const key=randomUUID(),clientId=randomUUID(),id=options.reconnect||key,openMode=options.reconnect?'reconnect':'new';
       const scope=dataTerminal?['--data-workspace']:hostAdmin?['--root']:context.project?['--project',context.project]:['--legacy'];
       const commandText=parts=>parts.map(value=>/^[A-Za-z0-9_.:-]+$/.test(value)?value:"'"+value.replaceAll("'","'\\''")+"'").join(' ');
-      const statusCommand=commandText(['gpuctl','terminal','status',id,'--machine',machine,...scope]);
+      const originalAccount=['--url',base.origin,'--session-file',sessionFile];
+      const statusCommand=commandText(['gpuctl','terminal','status',id,'--machine',machine,...scope,...originalAccount]);
       const reconnectCommand=commandText(['gpuctl',...(dataTerminal?['data','shell']:['ssh']),'--machine',machine,
-        ...(dataTerminal?[]:scope),'--reconnect',id]);
-      const terminal={id,machine,project:context.project||null,dataWorkspace:dataTerminal,hostAdmin,mode:openMode,state:'UNKNOWN',statusCommand};
-      const unconfirmed=error=>Object.assign(Error(`${error.message}\n终端状态未确认，未重开或重放输入。只读查询原会话：${statusCommand}`),{terminal,status:error.status,code:error.code});
-      // Print and durably save the original identity before dispatch. Writer
-      // credentials remain only in this connection's memory.
+        ...(dataTerminal?[]:scope),'--reconnect',id,...originalAccount]);
+      const terminal={id,machine,project:context.project||null,dataWorkspace:dataTerminal,hostAdmin,mode:openMode,state:'UNKNOWN',statusCommand,reconnectCommand};
+      const unconfirmed=error=>Object.assign(Error(`${error.message}\n${terminal.state==='ALIVE'?`原终端仍在运行，尚未附着。重连原会话：${reconnectCommand}`:terminal.state==='STOPPED'?`原终端已结束，未新建会话。只读查询：${statusCommand}`:`终端状态未确认，未重开或重放输入。只读查询原会话：${statusCommand}\n确认仍在运行后重连：${reconnectCommand}`}`),{terminal,status:error.status,code:error.code});
+      // Print the original identity before any request; never cache writer
+      // credentials or rely on a successful response to recover this handle.
       await new Promise((resolve,reject)=>process.stderr.write('Terminal: '+maintenanceJSON(terminal)+'\n',error=>error?reject(error):resolve()));
-      let opened;
+      let opened,openDispatched=false,openResponded=false;
       try{
         const latest=JSON.parse(await readFile(sessionFile,'utf8'));
         if(latest.url!==base.origin||latest.token!==session.token||latest.principal?.userId!==session.principal?.userId)
@@ -587,14 +675,36 @@ async function main(){
           fail('原终端记录的账号或范围不匹配，未打开终端；请使用原服务器和项目查询。');
         const next={...latest,terminalSessions:{...latest.terminalSessions,[id]:{...terminal,userId:session.principal.userId}}};
         await saveDatasetUploadSession(sessionFile,next);session=next;
+        openDispatched=true;
         opened=(await call('terminal.open',{machine,key,clientId,mode:openMode,...(options.reconnect?{id,takeover:options.takeover===true}:{}),hostAdmin,...context})).result;
+        openResponded=true;
         const uuid=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
         if(opened?.id!==id||opened.clientId!==clientId||opened.mode!==openMode||opened.hostAdmin!==hostAdmin||
           !uuid.test(opened.writerToken||'')||!Number.isFinite(opened.leaseExpiresAt)||opened.leaseExpiresAt<=Date.now()/1000||opened.leaseExpiresAt>=253402300800||
           opened.machine!==undefined&&opened.machine!==machine||opened.project!==undefined&&opened.project!==context.project||
           opened.dataWorkspace!==undefined&&opened.dataWorkspace!==dataTerminal)
           fail('终端身份或单写租约未获确认，未发送输入；请核对原会话和匹配节点协议。');
-      }catch(error){throw unconfirmed(error);}
+      }catch(error){
+        // An uncertain open may already have started the original session.
+        // Observe it once, without acquiring a writer or replaying the open.
+        if(openDispatched&&!openResponded&&(error.status===undefined||[502,503,504].includes(error.status))){
+          try{
+            const latest=JSON.parse(await readFile(sessionFile,'utf8'));
+            if(latest.url!==base.origin||latest.token!==session.token||latest.principal?.userId!==session.principal?.userId)throw Error('Account changed');
+            const observed=(await call('terminal.status',{machine,id,hostAdmin,...context},AbortSignal.timeout(10000))).result;
+            const current=JSON.parse(await readFile(sessionFile,'utf8'));
+            if(current.url!==latest.url||current.token!==latest.token||current.principal?.userId!==latest.principal?.userId)throw Error('Account changed');
+            if(observed?.protocol!=='terminal-session-status-v1'||observed.id!==id||observed.evidence?.confirmed!==true||
+              observed.machine!==undefined&&observed.machine!==machine||observed.project!==undefined&&observed.project!==context.project||
+              observed.hostAdmin!==undefined&&observed.hostAdmin!==hostAdmin||observed.dataWorkspace!==undefined&&observed.dataWorkspace!==dataTerminal)throw Error('Unconfirmed original terminal');
+            if(observed.state==='ALIVE'&&observed.evidence.socket==='RESPONDING'||observed.state==='STOPPED'&&observed.evidence.cgroupEmpty===true){
+              terminal.state=observed.state;
+              if(typeof observed.writerLeaseExpired==='boolean')terminal.writerLeaseExpired=observed.writerLeaseExpired;
+            }
+          }catch{/* Preserve the original uncertainty and identity if observation fails. */}
+        }
+        throw unconfirmed(error);
+      }
       let input=Buffer.alloc(0),offset=0,done=false,closed=false,delay=250,lastSize='';
       const sessionArgs={machine,id:opened.id,clientId,writerToken:opened.writerToken,hostAdmin,...context};
       process.stderr.write(`\r\n${machine} · ${dataTerminal?'个人数据 /data2':hostAdmin?'ROOT 宿主机':context.project?'项目 '+context.project:'个人工作区'} · ${opened.id}（Ctrl+] 仅断开；exit 结束此会话）\r\n`);
@@ -639,13 +749,16 @@ async function main(){
     }else if(command==='data'&&['import','imports','import-status','import-resume','import-cancel','import-discard'].includes(positionals[1])){
       if(training.length)fail('导入不接受额外命令。');
       result=await runCloudImport({action:positionals[1],positionals,options,machine:defaultMachine(),call});
-    }else if(command==='data'&&['put','files','publish','workspace-status'].includes(positionals[1])){
-      const action=positionals[1],allowed=['machines','datasets','url','session-file','json',...(action==='put'?['overwrite','via']:action==='publish'?['name','key']:[])];
+    }else if(command==='data'&&['put','get','files','publish','workspace-status'].includes(positionals[1])){
+      const action=positionals[1],allowed=['machines','datasets','url','session-file','json',...(action==='put'?['overwrite','via','key']:action==='publish'?['name','key']:[])];
       if(training.length||options.datasets.length||Object.keys(options).some(k=>!allowed.includes(k)))fail('Personal data commands do not accept project, root or training options');
       const machine=defaultMachine();if(machine==='auto'||!state.machines.some(m=>m.id===machine))fail('Select an authorized server explicitly');
       if(action==='put'){
         if(positionals.length<3||positionals.length>4)fail('Usage: data put LOCAL_FILE [REMOTE_FILE] [--overwrite]');
-        result=await putWorkspaceData(call,machine,positionals[2],positionals[3]||basename(positionals[2]),options.overwrite,{via:options.via||'auto'});
+        let last=0;result=await putWorkspaceData(call,machine,positionals[2],positionals[3]||basename(positionals[2]),options.overwrite,{via:options.via||'auto',key:options.key,progress:(phase,value)=>{if(phase==='HANDLE'||Date.now()-last>1000){last=Date.now();process.stderr.write(`${phase} · ${value.path}${value.uploadId?' · '+value.uploadId:''}${value.bytes!==undefined?' · '+value.bytes+' / '+value.totalBytes+' bytes':''}\n`);}}});
+      }else if(action==='get'){
+        if(positionals.length!==4)fail('Usage: data get REMOTE_FILE NEW_LOCAL_FILE --machine SERVER');
+        result=await getWorkspaceData(call,{machine,path:workspaceDataPath(positionals[2]),destination:positionals[3]});
       }else if(action==='files'){
         if(positionals.length>3)fail('Usage: data files [RELATIVE_DIRECTORY]');
         result=(await call('datasets.workspace.list',{machine,path:workspaceDataPath(positionals[2]||'.',{directory:true})})).result;
@@ -662,12 +775,16 @@ async function main(){
         if(result.state==='FAILED')process.exitCode=1;else if(result.state==='UNKNOWN')process.exitCode=3;
       }
     }else if(command==='data'&&positionals[1]==='upload'){
-      if(positionals.length!==3||training.length||options.datasets.length||Object.keys(options).some(k=>!['machines','datasets','url','session-file','json','name','via'].includes(k)))fail('Usage: data upload ARCHIVE_OR_DIRECTORY --name NAME [--machine SERVER] [--via auto|direct|relay]');
+      if(positionals.length!==3||training.length||options.datasets.length||Object.keys(options).some(k=>!['machines','datasets','url','session-file','json','name','via'].includes(k)))fail('Usage: data upload ARCHIVE_OR_DIRECTORY --name NAME [--machine SERVER] [--via auto|direct|campus]');
       if(!/^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/.test(options.name||''))fail('Dataset name must be 1–40 ASCII letters, digits, _ or -, beginning with a letter or digit');
       const machine=defaultMachine();if(machine==='auto'||!state.machines.some(m=>m.id===machine))fail('Select an authorized server explicitly');
       let last=0,phase='';const progress=(next,value)=>{if(next==='HANDLE'){process.stderr.write(`Upload: ${value.uploadId} · ${value.machine}\n`);return;}if(next==='ROUTE'){process.stderr.write(value.kind==='campus-direct'?'传输路径：直连上传节点（文件不经平台中转）\n':value.kind==='tail-upload'?'传输路径：Tail 备用上传（不改变默认路由；中继可能影响速度）\n':`传输路径：VPS 中转${value.explicit?'（已明确选择）':'（小文件通道）'}\n`);return;}const now=Date.now();if(next!==phase||now-last>1000){phase=next;last=now;process.stderr.write(`${next}${value.bytes!==undefined?' · '+value.bytes+(value.totalBytes!==undefined?' / '+value.totalBytes:'')+' bytes':''}${value.path?' · '+value.path:''}\n`);}};
       const saveUploadValue=async(field,key,value)=>{const next={...session,[field]:{...session[field],[key]:value}};await saveDatasetUploadSession(sessionFile,next);session=next;};
-      const keyStore={get:key=>session.datasetUploadKeys?.[key],set:(key,value)=>saveUploadValue('datasetUploadKeys',key,value),getIntent:key=>session.datasetUploadIntents?.[key],setIntent:(key,value)=>saveUploadValue('datasetUploadIntents',key,value),getHandle:key=>session.datasetUploadHandles?.[key],setHandle:(key,value)=>saveUploadValue('datasetUploadHandles',key,value)};
+      const keyStore={get:key=>session.datasetUploadKeys?.[key],set:(key,value)=>saveUploadValue('datasetUploadKeys',key,value),getIntent:key=>session.datasetUploadIntents?.[key],setIntent:(key,value)=>saveUploadValue('datasetUploadIntents',key,value),getHandle:key=>session.datasetUploadHandles?.[key],setHandle:(key,value)=>saveUploadValue('datasetUploadHandles',key,value),
+        hashJournal:scope=>{
+          const uploadId=originalDatasetUploadId(session,scope),intent=Object.values(session.datasetUploadIntents||{}).find(row=>uploadId&&row.uploadId===uploadId);
+          return createDatasetHashJournal({base:dirname(sessionFile),origin:base.origin,...scope,uploadId,manifestSha256:intent?.specification?.manifestSha256});
+        }};
       result=await uploadLocalDataset(call,{machine,name:options.name,userId:session.principal.userId,directory:positionals[2],progress,keyStore,admission:state.datasetUploadAdmission,via:options.via||'auto'});
     }else if(command==='data'&&['upload-status','upload-discard'].includes(positionals[1])){
       if(positionals.length!==3||training.length||options.datasets.length||Object.keys(options).some(k=>!['machines','datasets','url','session-file','json'].includes(k)))fail('Usage: data upload-status|upload-discard UPLOAD_ID [--machine SERVER]');
@@ -780,7 +897,7 @@ async function main(){
       const placement=placementKeys.some(k=>Object.hasOwn(options,k))?gpuPlacement({gpuIndices:indices,shared:options.share===true,...(options['vram-mib']?{vramMiB:Number(options['vram-mib'])}:{}),hami:options.hami===true,...(options['sm-percent']?{smPercent:Number(options['sm-percent'])}:{})},cards,elastic,scheduling,options.priority):null;
       if(options.description!==undefined&&state.taskMetadata?.version!==1)fail('当前后台尚未支持任务描述；不会忽略你填写的内容。');
       if(context.project){
-        if(options.sync)context.release=await synchronizeProjectRun(call,{machine:developmentMachine,project:context.project,directory:options['sync-dir']||process.cwd()});
+        if(options.sync)context.release=await synchronizeProjectRun(call,{machine:developmentMachine,project:context.project,directory:options['sync-dir']||process.cwd(),savePublication});
         else{
           const current=(await call('projects.status',{machine:developmentMachine,project:context.project})).result;
           const release=options.release||current.latestReadyRelease;
@@ -826,14 +943,17 @@ async function main(){
       result=(await call('community.notes.delete',{id:note.id,revision:note.revision})).result;
     }
     else if(['logs','cancel'].includes(command)&&positionals.length===2)result=(await call(command==='logs'?'jobs.logs':'jobs.cancel',{jobId:positionals[1]})).result;
-    else if(command==='files'&&positionals.length<=3)result=(await call('files.list',{machine:positionals[1],path:positionals[2]||'.',...fileArgs(positionals[1])})).result;
+    else if(command==='files'&&positionals.length<=3){
+      result=(await call('files.list',{machine:positionals[1],path:positionals[2]||'.',...fileArgs(positionals[1]),...(options.cursor!==undefined?{cursor:options.cursor}:{}),...(options.limit!==undefined?{limit:Number(options.limit)}:{})})).result;
+      if((options.cursor!==undefined||options.limit!==undefined)&&result?.protocol!==1)fail('Node did not confirm directory pagination; this response is not a complete listing');
+    }
     else if(['upload','upload-status'].includes(command)&&positionals.length>=3&&positionals.length<=4){
       if(options.job)fail('Job outputs cannot be uploaded; upload project code without --job');
       const machine=positionals[1],context=fileArgs(machine);
       result=await uploadCodeFiles(call,{machine,context,local:positionals[2],remote:positionals[3]||basename(positionals[2]),inspectOnly:command==='upload-status'});
     }else if(command==='download'&&positionals.length===4){
       const context=fileArgs(positionals[1]);
-      result=await downloadFile(call,{machine:positionals[1],context,path:positionals[2],destination:positionals[3],origin:base.origin,userId:session.principal.userId});
+      result=await downloadCampusFile(call,{machine:positionals[1],context,path:positionals[2],destination:positionals[3],origin:base.origin,userId:session.principal.userId,sessionFile});
     }else if(command==='grant'&&positionals.length===2){
       const userId=find(positionals[1]),policyVersion=state.users.find(u=>u.id===userId).policyVersion;
       if(options.full){result=(await call('policy.full',{userId,policyVersion})).result;}
@@ -885,6 +1005,7 @@ async function main(){
   }
   if(command==='project'&&positionals[1]==='upload-cancel'){console.log(`${result.state} · ${result.uploadId}\n仅处理未提交的临时上传；不会删除项目代码或已发布版本。`);return;}
   if(command==='data'&&positionals[1]==='put'){console.log(`已上传 ${result.bytes} 字节 → ${result.machine}:${result.path}\n未自动解压或发布。进入个人数据终端：gpuctl data shell`);return;}
+  if(command==='data'&&positionals[1]==='get'){console.log(`已下载：${maintenanceVisible(result.downloaded)}（${result.bytes} 字节）${result.recovery?(result.recovery.verified?' · 已校验':' · 原清单无 SHA'):''}`);return;}
   if(command==='data'&&['publish','workspace-status'].includes(positionals[1])){console.log(`${result.state} · ${result.machine}${result.error?'\n'+result.error:''}${result.operationId?'\n查看：gpuctl data workspace-status '+result.operationId+' --machine '+result.machine:''}${result.state==='READY'?'\n数据集：'+result.dataset+'@'+result.version+'\n训练只读路径：/data2/'+result.dataset:''}`);return;}
   if(command==='data'&&positionals[1]==='upload'){console.log(`数据集已就绪：${result.machine}\n${result.dataset}@${result.version}\n训练只读路径：/data2/${result.dataset}\n可在 run 中使用 --data ${result.dataset}@${result.version}`);return;}
   if(command==='data'&&['upload-status','upload-discard'].includes(positionals[1])){console.log(`${result.state} · ${result.uploadId} · ${result.machine}${result.error?'\n'+result.error:''}${result.state==='READY'?'\n'+result.dataset+'@'+result.version+'\n训练只读路径：/data2/'+result.dataset:''}`);return;}
@@ -917,7 +1038,13 @@ async function main(){
   if(command==='upload-status'){console.log(result.files.map(file=>`${file.path}: ${file.state} ${file.receivedBytes??0}/${file.totalSize??'?'} B${file.uploadId?' · '+file.uploadId:''}`).join('\n')||'没有可查询的文件。');return;}
   if(command==='download'){console.log(`已下载：${result.downloaded}（${result.bytes} 字节）`);return;}
   if(command==='jobs'){console.log(result.length?[...result].slice(-50).reverse().map(j=>`${j.id}  ${j.state}${j.preempted?'（让位中断，不会自动重跑）':''}\n  ${j.machine} · ${allocationLabel(j)} · ${j.name||'train'} · 优先级 ${['idle','normal','high'].includes(j.priority)?j.priority:'旧策略／未核验'}${j.schedulerState?' · 调度 '+j.schedulerState:''}${j.queueReason?'\n  排队原因：'+j.queueReason:''}\n  ${progressText(j.progress)}${jobTimingText(j)?'\n  '+jobTimingText(j):''}`).join('\n'):'暂无任务。');if(result.length>50)console.log('仅显示最近 50 条；完整记录：gpuctl jobs --json');return;}
-  if(command==='files'){console.log(result.entries.map(f=>`${f.type==='directory'?'[目录]':'[文件]'} ${f.name}${f.type==='file'?'  '+f.size+' B':''}`).join('\n')||'目录为空。');return;}
+  if(command==='files'){
+    console.log(result.entries.map(f=>`${f.type==='directory'?'[目录]':'[文件]'} ${f.name}${f.type==='file'?'  '+f.size+' B':''}`).join('\n')||'目录为空。');
+    if(result.protocol===1)console.log(`本页 ${result.returned} / 共 ${result.total} 项${result.hasMore?'，还有下一页':'，本目录已列完'}`);
+    if(result.nextCursor)console.log('继续相同 files 命令并加 --cursor '+result.nextCursor);
+    if(result.retention?.status==='UNCONFIRMED')console.log('本作业输出到期时间未确认；当前没有本人延长/保护命令，请及时下载核验。');
+    return;
+  }
   if(command==='maintenance'){
     const v=maintenanceVisible;
     if(result.version===1&&Object.hasOwn(result,'global')){
@@ -935,7 +1062,8 @@ async function main(){
   }
   if(command==='users'){console.log(result.map(u=>`${u.username}  ${u.role==='admin'?'管理员':'普通用户'}  ${u.enabled?'启用':'暂停'}  总额度 ${u.total} 张\n  ${Object.entries(u.limits).map(([m,n])=>`${m}: ${n}`).join('，')||'尚未授权机器'}`).join('\n'));return;}
   console.log(JSON.stringify(result,null,2));
+  } finally { await finishPlatformControlTransport(controlTransport); }
 }
 if(process.argv[1]&&fileURLToPath(import.meta.url)===realpathSync(process.argv[1])){
-  main().catch(error=>{console.error(wantsJSON?maintenanceJSON({ok:false,error:error.message,...(error.terminal?{terminal:error.terminal,...terminalErrorMetadata(error)}:{})}):`Error: ${maintenanceVisible(error.message)}`);process.exitCode=1;});
+  main().catch(error=>{console.error(wantsJSON?maintenanceJSON({ok:false,error:error.message,...(error.publication?{publication:error.publication}:{}),...(error.terminal?{terminal:error.terminal,...terminalErrorMetadata(error)}:{}),...(error.download?{download:error.download}:{})}):`Error: ${maintenanceVisible(error.message)}`);process.exitCode=1;});
 }

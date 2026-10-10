@@ -11,6 +11,11 @@ import {datasetCacheWatch} from './dataset-cache-watch.js';
 import {mountCacheOperation,mountCacheTransfer,canCacheAction} from './dataset-cache-operation.js';
 import {mountFilesPreview} from './dataset-files-preview.js';
 import {mountMemberStorage} from './member-storage-ui.js';
+// Only a confirmed local warehouse source can prepare a cache until the exact
+// capability read explicitly enables cross-node copying (production: false).
+export function warehouseCachePreparationAllowed(version,machine,capability){
+ return hasReadableLocalOriginal(version,machine)||version?.canUse===true&&capability?.protocol===1&&capability.crossNodeEnabled===true&&version.servers?.some(row=>row.machine!==machine&&row.state==='READY'&&row.canUse===true)===true;
+}
 const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const amount=value=>Number.isSafeInteger(value)&&value>=0?transferBytes(value):'—';
 const glyph=value=>`<span class="v3-g ${value==='READY'?'ready':value==='PREPARING'?'fetch':value==='FAILED'?'fail':value==='UNKNOWN'?'unknown':'none'}" role="img" aria-label="${esc(words[value]||'待确认')}" title="${esc(words[value]||'待确认')}"></span>`;
@@ -28,10 +33,10 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
  let model=null,selected=null,selectedVersion=null,filter=null,warehouseFilter=null,search='',capacities=new Map(),epoch=0,routeEpoch=0,route=null,routeAbort=null,selectedFiles=[],uploadName='',phoneDetail=false,installedObserver=null;
  let upload=null,uploadBusy=false,uploadLocked=false,uploadDisplay='',lastControls={};
  let overview=null,legacyCatalog=null,capacityCatalog=null,overviewRequest=0,overviewAbort=null;
- let expiryTimer=null,listFailed=false;
+ let expiryTimer=null,listFailed=false,overviewRetry=false,overviewBusy=false;
  const history=()=>storageDisplayHistory(store);
  const physicalFields=TRAINING_READING_FIELDS.filter(path=>path.startsWith('volume.'));
- function scheduleExpiry(){clearTimeout(expiryTimer);const delay=history().nextExpiry();if(delay!==null&&!section.hidden&&document.body.dataset.room==='datasets'){expiryTimer=setTimeout(()=>{rail();rows();scheduleExpiry();},delay+1);expiryTimer?.unref?.();}}
+ function scheduleExpiry(){clearTimeout(expiryTimer);const expiry=history().nextExpiry(),delay=overviewRetry?Math.min(expiry??Infinity,15000):expiry;if(delay!==null&&!section.hidden&&!document.hidden&&document.body.dataset.room==='datasets'){expiryTimer=setTimeout(()=>{rail();rows();loadOverview();},delay+1);expiryTimer?.unref?.();}}
  function rememberList(){const root=section.querySelector('#dataset-catalog');if(model&&root)history().observe('catalog-list','last',{markup:root.innerHTML,sample:1},['sample'],model.collectedAt??model.checkedAt??null);scheduleExpiry();}
  function beginRead(){history().begin('warehouse');history().begin('training',(store.data?.machines||[]).map(row=>row.id));}
  function remember(source,id){
@@ -48,13 +53,15 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
    if(source==='capacity'&&card.machine!==id)continue;
    if(source==='overview'&&!overview?.warehouse.volumes.some(row=>row.machine===card.machine))continue;
    if(source==='capacity'&&!capacities.get(id)?.storageOverview?.warehouse)continue;
-   memory.observe('warehouse',card.machine,card,source==='catalog'?['contentBytes','datasetCount']:source==='capacity'?WAREHOUSE_READING_FIELDS.filter(field=>!['contentBytes','datasetCount'].includes(field)):WAREHOUSE_READING_FIELDS,card.collectedAt??model?.checkedAt??null);
+   memory.observe('warehouse',card.machine,card,source==='catalog'?['contentBytes','datasetCount']:source==='capacity'?WAREHOUSE_READING_FIELDS.filter(field=>!['contentBytes','datasetCount'].includes(field)):WAREHOUSE_READING_FIELDS,source==='catalog'?model?.checkedAt??null:card.collectedAt??null);
+   if(source==='overview')memory.observe('warehouse',card.machine,card,['contentBytes','datasetCount'],card.catalogCollectedAt??overview?.checkedAt??null);
   }
   for(const cache of facts.caches){
    if(source==='capacity'&&(cache.machine!==id||capacities.get(id)?.available!==true))continue;
    if(source==='overview'&&!overview?.caches.some(row=>row.machine===cache.machine))continue;
    const fields=source==='catalog'?['readyContentBytes','readyVersionCount']:source==='capacity'?physicalFields:TRAINING_READING_FIELDS;
    memory.observe('training',cache.machine,cache,fields,source==='catalog'?model?.checkedAt??null:cache.volume?.collectedAt??null);
+   if(source==='overview')memory.observe('training',cache.machine,cache,['readyContentBytes','readyVersionCount'],cache.catalogCollectedAt??overview?.checkedAt??null);
   }
   scheduleExpiry();
  }
@@ -79,7 +86,7 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
   if(v)return versionAccess(v).selectable;
   return upload?.state==='READY'&&upload.machine===machine()&&upload.dataset===dataset&&upload.version===version;
  }
- function reset(){clearTimeout(expiryTimer);history().forget('catalog-list');listFailed=false;epoch++;cacheWatch.reset();retireCacheActions();closeFilesPreview();overviewRequest++;overviewAbort?.abort();overviewAbort=null;overview=null;legacyCatalog=null;capacityCatalog=null;routeEpoch++;routeAbort?.abort();routeAbort=null;route=null;model=null;selected=null;selectedVersion=null;filter=null;warehouseFilter=null;search='';capacities.clear();labels.reset();selectedFiles=[];uploadName='';uploadDisplay='';upload=null;uploadBusy=false;uploadLocked=false;meter.reset();phoneDetail=false;section.querySelector('.v3-label-dialog')?.close();const searchInput=section.querySelector('#warehouse-search');if(searchInput)searchInput.value='';memberSpace?.reset();rail();rows();inspector();header();}
+ function reset(){clearTimeout(expiryTimer);history().forget('catalog-list');listFailed=false;overviewRetry=false;epoch++;cacheWatch.reset();retireCacheActions();closeFilesPreview();overviewRequest++;overviewAbort?.abort();overviewAbort=null;overview=null;legacyCatalog=null;capacityCatalog=null;routeEpoch++;routeAbort?.abort();routeAbort=null;route=null;model=null;selected=null;selectedVersion=null;filter=null;warehouseFilter=null;search='';capacities.clear();labels.reset();selectedFiles=[];uploadName='';uploadDisplay='';upload=null;uploadBusy=false;uploadLocked=false;meter.reset();phoneDetail=false;section.querySelector('.v3-label-dialog')?.close();const searchInput=section.querySelector('#warehouse-search');if(searchInput)searchInput.value='';memberSpace?.reset();rail();rows();inspector();header();}
  function closeCacheAction(){actionLifetime?.abort();actionUI?.destroy();actionUI=null;actionLifetime=null;actionContext=null;section.querySelector('#warehouse-cache-action')?.close();}
  function retireCacheActions(close=true){capabilityRequest++;capabilityAbort?.abort();capabilityAbort=null;capabilityScope=null;capabilityBusy=false;capabilityUnavailable=false;cacheCapabilities.clear();if(close)closeCacheAction();}
  async function readCacheCapabilities(){
@@ -101,7 +108,8 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
  function openCacheAction(action,target){
   const item=model?.datasets.find(row=>row.dataset===selected),v=item?.versions.find(row=>row.version===selectedVersion),row=v?.servers.find(value=>value.machine===target),cap=cacheCapabilities.get(target)?.raw;
   if(!v?.canUse||!row||!authorized(target)||maintenanceFor(store.data?.operationalMaintenance,target)||!overview||lastControls.busy||capabilityScope!==JSON.stringify([account(),selected,selectedVersion]))return;
-  const targets=v.servers.filter(value=>value.machine!==target&&authorized(value.machine)&&!maintenanceFor(store.data?.operationalMaintenance,value.machine)&&canCacheAction(cacheCapabilities.get(value.machine)?.raw,'prepare')).map(value=>({machine:value.machine,capabilities:cacheCapabilities.get(value.machine).raw}));
+  if(action==='prepare'&&!warehouseCachePreparationAllowed(v,target,cap)||action==='transfer'&&cap?.crossNodeEnabled!==true)return;
+  const targets=v.servers.filter(value=>value.machine!==target&&authorized(value.machine)&&!maintenanceFor(store.data?.operationalMaintenance,value.machine)&&cacheCapabilities.get(value.machine)?.raw?.crossNodeEnabled===true&&canCacheAction(cacheCapabilities.get(value.machine)?.raw,'prepare')).map(value=>({machine:value.machine,capabilities:cacheCapabilities.get(value.machine).raw}));
   if(action==='transfer'?(row.state!=='READY'||!targets.length):!canCacheAction(cap,action))return;
   closeCacheAction();let dialog=section.querySelector('#warehouse-cache-action');
   if(!dialog){dialog=document.createElement('dialog');dialog.id='warehouse-cache-action';dialog.className='dataset-sheet v3-cache-sheet';dialog.innerHTML='<header class="dataset-sheet-head"><h2></h2><button class="button quiet" type="button" data-v3-cache-close aria-label="关闭">关闭</button></header><div data-v3-cache-host></div>';section.append(dialog);dialog.addEventListener('close',()=>{if(!dialog.open)closeCacheAction();});}
@@ -194,7 +202,7 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
    const cards=warehouseStorageCards(overview,model,capacities,capacityCatalog||model,store.data?.datasetUploadAdmission),memory=history();
    for(const machine of memory.warehouses())if(!cards.some(row=>row.machine===machine))cards.push({machine});
    const display=cards.map(card=>{const row=memory.project('warehouse',card.machine,card,WAREHOUSE_READING_FIELDS);row.known=row.totalBytes>0&&row.usedBytes!==null&&row.availableBytes!==null&&row.contentBytes!==null&&row.usedBytes+row.availableBytes<=row.totalBytes;return row;});
-   html(warehouse,display.map(row=>warehouseCardHTML({...row,maintenance:maintenanceFor(store.data?.operationalMaintenance,row.machine)},warehouseFilter===row.machine)).join('')||(memory.loading('warehouse')?'<div class="v4-warehouse-empty" aria-label="读取中"><span class="storage-reading-skeleton"></span></div>':'<div class="v4-warehouse-empty">未知</div>'));
+   html(warehouse,display.map(row=>warehouseCardHTML({...row,maintenance:maintenanceFor(store.data?.operationalMaintenance,row.machine)},warehouseFilter===row.machine)).join('')||(memory.loading('warehouse')?'<div class="v4-warehouse-empty" aria-label="读取中"><span class="storage-reading-skeleton"></span></div>':'<div class="v4-warehouse-empty">读取中</div>'));
   }
  }
  function filters(){
@@ -207,7 +215,7 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
   if(listFailed&&!model){
    const previous=history().project('catalog-list','last',null,['sample']),retained=previous.sample===1;
    root.classList.toggle('storage-reading-stale',retained);root.title=retained?capacityCollectedTitle(previous.collectedAt):'';
-   html(root,retained?previous.markup:'<div class="v3-empty">未知</div>');
+   html(root,retained?previous.markup:'<div class="v3-empty">读取中</div>');
    for(const button of root.querySelectorAll('button'))button.disabled=true;
    templates.delete(root);return;
   }
@@ -219,7 +227,7 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
   html(root,pendingRow+items.map(item=>{const v=chosen(item);if(!v)return '';const caches=v.servers.map(row=>cacheRow(item.dataset,v,row)).filter(row=>(row.observed||cacheWatch.get({machine:row.machine,dataset:item.dataset,version:v.version}))&&['READY','PREPARING','FAILED','UNKNOWN'].includes(row.state));
    const flags=(versionAccess(v).browseOnly?'<span class="v3-flag warn">仅浏览</span>':'')+(v.warehouse.state==='unrecorded'?'<span class="v3-flag warn">未存入仓库</span>':v.warehouse.state==='unknown'?'':v.warehouse.state==='failed'?'<span class="v3-flag bad">存入失败</span>':'');
    return `<button class="v3-row" type="button" role="option" aria-selected="${selected===item.dataset}" data-v3-select="${esc(item.dataset)}">${strata(v.warehouse.state)}<span class="v3-name"><b title="${esc(item.displayName)}">${esc(item.displayName)}</b><span class="v3-id" title="${esc(item.dataset)}">${esc(item.dataset)}</span></span><span class="v3-owner" title="所属 ${esc(datasetOwnerName(v.ownerLabel))}">${esc(datasetOwnerName(v.ownerLabel))}</span><span class="v3-size num">${esc(amount(v.bytes))}</span><span class="v4-warehouse-where" title="${esc(datasetWarehouseMachines(v).join('、'))}">${datasetWarehouseMachines(v).map(id=>`<span>${esc(short(id))}</span>`).join('')||'—'}</span><span class="v3-where">${caches.map(row=>`<span class="v3-pip" title="${esc(row.machine+' · '+words[row.state])}">${glyph(row.state)}<span class="v3-pip-id">${esc(short(row.machine))}</span></span>`).join('')}${flags}</span></button>`;
-  }).join('')||(model?`<div class="v3-empty">${model.partial?'目录待确认':search?'没有匹配的数据集':filter?'这台服务器上还没有缓存':'仓库里还没有数据集'}${!search&&!filter&&!model.partial?'<button type="button" class="button primary" data-v3-upload>＋ 上传数据</button>':''}</div>`:''));
+  }).join('')||(model?`<div class="v3-empty">${model.loading?'读取中':model.partial?'部分目录待确认':search?'没有匹配的数据集':filter?'这台服务器上还没有缓存':'仓库里还没有数据集'}${!search&&!filter&&!model.partial?'<button type="button" class="button primary" data-v3-upload>＋ 上传数据</button>':''}</div>`:''));
  }
  function inspector(){
   const root=section.querySelector('#warehouse-inspector'),item=model?.datasets.find(row=>row.dataset===selected);if(!root)return;
@@ -231,12 +239,12 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
   const versions=item.versions.length>1?`<select class="v3-version" data-v3-version aria-label="版本">${item.versions.map(row=>`<option value="${esc(row.version)}" title="${esc(row.version)}" ${row===v?'selected':''}>${esc(row.version.slice(0,12))}</option>`).join('')}</select><button type="button" class="v3-copy" data-v3-copy="${esc(v.version)}" aria-label="复制完整版本">复制</button>`:`<button type="button" class="v3-copy" data-v3-copy="${esc(v.version)}" title="${esc(v.version)}" aria-label="复制完整版本">${esc(v.version.slice(0,12))} · 复制</button>`;
   const canTrain=allowsTraining(item.dataset,v.version);
   html(root,`<div class="v3-detail-scroll"><button class="button quiet v3-back" type="button" data-v3-back>‹ 数据集</button><section><h2><span title="${esc(item.displayName)}">${esc(item.displayName)}</span><button type="button" class="v3-edit" data-v3-label="${esc(item.dataset)}" aria-label="修改显示名" ${v.canUse&&authorized(machine())?'':'disabled'}>✎</button></h2><div class="v3-idline"><code title="${esc(item.dataset)}">${esc(item.dataset)}</code><button type="button" class="v3-copy" data-v3-copy="${esc(item.dataset)}">复制</button></div><div class="v3-meta"><span>所属 ${esc(datasetOwnerName(v.ownerLabel))}</span><span class="num">${esc(amount(v.bytes))}</span>${v.files===null?'':`<span class="num">${v.files.toLocaleString('zh-CN')} 个文件</span>`}<span>${item.versions.length} 个版本</span></div></section><section><div class="v3-lab"><span class="v4-step"><b>1</b>仓库</span>${versions}</div>${warehouseRows}<div id="warehouse-files-preview"></div>${w.records.filter(row=>versionAccess(v).canRetry&&row.machine===machine()&&row.storage.version===v.version&&['FAILED','BLOCKED'].includes(row.storage.phase)).map(row=>`<button class="button" type="button" data-retry-archive="${esc(row.storage.dataset)}" data-version="${esc(v.version)}">重试</button>`).join('')}</section><section><div class="v3-lab copy-caption"><span class="v4-step"><b>2</b>缓存</span>${v.selected.error?info(v.selected.error,'缓存结果'):""}</div>${v.servers.map(row=>{
-   row=cacheRow(item.dataset,v,row);const source=hasReadableLocalOriginal(v,row.machine)&&row.canPrepare||v.servers.some(server=>server.machine!==row.machine&&server.state==='READY'&&server.canUse);
-   const mayCache=v.canUse&&!lastControls.busy&&authorized(row.machine)&&!maintenanceFor(store.data?.operationalMaintenance,row.machine)&&!['READY','PREPARING','UNKNOWN'].includes(row.state)&&row.directoryState==='ok'&&(row.canUse&&row.canPrepare||source);
+   row=cacheRow(item.dataset,v,row);const source=warehouseCachePreparationAllowed(v,row.machine,cacheCapabilities.get(row.machine)?.raw);
+   const mayCache=v.canUse&&!lastControls.busy&&authorized(row.machine)&&!maintenanceFor(store.data?.operationalMaintenance,row.machine)&&!['READY','PREPARING','UNKNOWN'].includes(row.state)&&row.directoryState==='ok'&&source;
    const cap=cacheCapabilities.get(row.machine),newActions=overview&&!capabilityUnavailable,enabled=v.canUse&&!lastControls.busy&&authorized(row.machine)&&!maintenanceFor(store.data?.operationalMaintenance,row.machine);
-   const transferTargets=v.servers.some(target=>target.machine!==row.machine&&authorized(target.machine)&&canCacheAction(cacheCapabilities.get(target.machine)?.raw,'prepare'));
-   const legacyCacheAction=['READY','PREPARING'].includes(row.state)?'':`<button class="button ${row.state==='FAILED'?'quiet':'v3-outline'} v3-small" type="button" data-v3-cache="${esc(row.machine)}" data-dataset="${esc(item.dataset)}" data-version="${esc(v.version)}" ${mayCache?'':'disabled'}>${row.state==='FAILED'?'重试':'缓存'}</button>`;
-   const prepareAction=newActions&&canCacheAction(cap?.raw,'prepare')?enabled&&!['READY','PREPARING'].includes(row.state)?`<button class="button v3-outline v3-small" type="button" data-v3-cache-action="prepare" data-machine="${esc(row.machine)}">缓存</button>`:'':legacyCacheAction;
+   const transferTargets=cap?.raw?.crossNodeEnabled===true&&v.servers.some(target=>target.machine!==row.machine&&authorized(target.machine)&&cacheCapabilities.get(target.machine)?.raw?.crossNodeEnabled===true&&canCacheAction(cacheCapabilities.get(target.machine)?.raw,'prepare'));
+   const legacyCacheAction=['READY','PREPARING'].includes(row.state)||!mayCache?'':`<button class="button ${row.state==='FAILED'?'quiet':'v3-outline'} v3-small" type="button" data-v3-cache="${esc(row.machine)}" data-dataset="${esc(item.dataset)}" data-version="${esc(v.version)}">${row.state==='FAILED'?'重试':'缓存'}</button>`;
+   const prepareAction=newActions&&canCacheAction(cap?.raw,'prepare')?enabled&&source&&!['READY','PREPARING'].includes(row.state)?`<button class="button v3-outline v3-small" type="button" data-v3-cache-action="prepare" data-machine="${esc(row.machine)}">缓存</button>`:'':legacyCacheAction;
    const cacheAction=newActions?`<span class="v3-server-actions">${prepareAction}${enabled&&row.state==='READY'&&transferTargets?`<button class="button quiet v3-small" type="button" data-v3-cache-action="transfer" data-machine="${esc(row.machine)}">转移到…</button>`:''}${enabled&&canCacheAction(cap?.raw,'release')?`<button class="button quiet v3-small" type="button" data-v3-cache-action="release" data-machine="${esc(row.machine)}">释放缓存</button>`:''}</span>`:prepareAction;
    const status=(['NOT_LOCAL','REGISTERED','READY','UNKNOWN'].includes(row.state)?'':words[row.state])+(row.progress?' · '+amount(row.progress.bytes)+' / '+amount(row.progress.totalBytes):'');
    return `<article data-cache-context="${esc(machine())}" class="v3-server dataset-card ${row.machine===machine()?'cur':''}">${glyph(row.state)}<span class="v3-server-text"><b title="${esc(row.machine)}">${esc(row.machine)}</b><span title="${esc(status)}" ${cacheWatch.get({machine:row.machine,dataset:item.dataset,version:v.version})?'role="status"':''}>${esc(status)}${row.error?info(row.error,'缓存结果'):''}</span></span>${cacheAction}${newActions&&(cap?.reason||cap?.raw?.reason)?`<p class="v3-cache-reason" title="${esc(cap.reason||cap.raw.reason)}">${esc(cap.reason||cap.raw.reason)}</p>`:''}</article>`;
@@ -253,39 +261,53 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
   root.classList.toggle('v3-inspector-page-scroll',matchMedia('(max-width:759px)').matches||root.getBoundingClientRect().height/scale>available);
  }
  function render(){header();rail();rows();inspector();uploadUI();memberSpace?.render();}
- function catalog(value){legacyCatalog=value;applyCatalog();remember('catalog');rememberList();rail();}
+ function catalog(value){legacyCatalog=value;applyCatalog();remember('catalog');rememberList();overviewRetry ||= value.loading===true||value.stale===true||value.refreshing===true;rail();scheduleExpiry();}
  function applyCatalog(){
   if(!legacyCatalog&&!overview)return;listFailed=false;
   const principal={...store.principal,username:store.principal?.username||store.users?.find(row=>row.id===store.principal?.userId)?.username};
   const rawLegacy=legacyCatalog?aggregateDatasetCatalog(legacyCatalog):null,legacy=rawLegacy?readableDatasetCatalog(rawLegacy,principal):null;
-  model=overview&&(overview.datasets.length||!legacy?.datasets.length)?readableDatasetCatalog(overviewDatasetCatalog(overview,machine(),legacyCatalog),principal):legacy;
+  model=overview&&!overview.loading&&(overview.datasets.length||!legacy?.datasets.length)?readableDatasetCatalog(overviewDatasetCatalog(overview,machine(),legacyCatalog),principal):legacy;
   capacityCatalog=legacy?{...legacy,datasets:legacy.datasets.flatMap(item=>{
    const visible=model.datasets.find(row=>row.dataset===item.dataset),versions=item.versions.filter(v=>visible?.versions.some(row=>row.version===v.version));
    return versions.length?[{...item,versions}]:[];
   })}:model;
   if(rawLegacy)capacityCatalog.capacityUsageComplete=capacityCatalog.datasets.reduce((n,item)=>n+item.versions.length,0)===rawLegacy.datasets.reduce((n,item)=>n+item.versions.length,0);
+  if(!model){render();return;}
   cacheWatch.catalog(model.datasets.flatMap(item=>item.versions.flatMap(v=>v.servers.map(row=>({machine:row.machine,dataset:item.dataset,version:v.version,physicalDataset:row.dataset,state:row.state,canUse:v.canUse,totalBytes:v.bytes})))));
   if(!model.datasets.some(item=>item.dataset===selected)){selected=model.datasets[0]?.dataset||null;selectedVersion=null;}render();
  }
- function storageOverview(value){overview=adaptStorageOverview(value);history().fail('warehouse');history().fail('training');
+ function storageOverview(value){overview=adaptStorageOverview(value);overviewRetry=!!overview&&(overview.loading||overview.refreshing||overview.stale||overview.partial||overview.caches.some(row=>row.volume.state!=='READY')||overview.warehouse.volumes.some(row=>row.volume.state!=='READY'));history().fail('warehouse');history().fail('training');
   if(overview)for(const row of value.warehouse?.volumes||[])history().confirmWarehouse(row.machine);
-  retireCacheActions(false);if(overview||legacyCatalog)applyCatalog();if(overview){remember('overview');rememberList();}rail();scheduleExpiry();}
+  retireCacheActions(false);if(overview||legacyCatalog)applyCatalog();if(overview){remember('overview');rememberList();}rail();scheduleExpiry();
+  if(overview&&!overview.loading&&(!legacyCatalog||legacyCatalog.loading||legacyCatalog.stale||legacyCatalog.refreshing))queueMicrotask(refresh);}
  async function loadOverview(){
-  if(!store.production||!store.principal||section.hidden||document.body.dataset.room!=='datasets')return;
-  history().begin('warehouse');history().begin('training');const expected=account(),token=epoch,request=++overviewRequest;overviewAbort?.abort();const controller=new AbortController();overviewAbort=controller;
+  if(overviewBusy||!store.production||!store.principal||section.hidden||document.body.dataset.room!=='datasets')return;
+  overviewBusy=true;history().begin('warehouse');history().begin('training');const expected=account(),token=epoch,request=++overviewRequest;overviewAbort?.abort();const controller=new AbortController();overviewAbort=controller;
   try{const value=await readStorageOverview(store,{signal:controller.signal});if(current(expected,token)&&request===overviewRequest&&!section.hidden&&document.body.dataset.room==='datasets')storageOverview(value);}
-  catch{if(current(expected,token)&&request===overviewRequest){overview=null;if(legacyCatalog)applyCatalog();history().fail('warehouse');history().fail('training');rail();scheduleExpiry();}}
+  catch(error){if(current(expected,token)&&request===overviewRequest){if([401,403].includes(error.status)){reset();return;}overviewRetry=true;if(legacyCatalog)applyCatalog();history().fail('warehouse');history().fail('training');rail();scheduleExpiry();}}finally{overviewBusy=false;}
  }
- function catalogUnavailable({retainList=true}={}){listFailed=retainList;history().fail('catalog-list');history().fail('warehouse');history().fail('training');scheduleExpiry();retireCacheActions();closeFilesPreview();overviewRequest++;overviewAbort?.abort();overview=null;legacyCatalog=null;capacityCatalog=null;model=null;selected=null;selectedVersion=null;rail();rows();inspector();memberSpace?.render();}
+ function catalogUnavailable({retainList=true}={}){listFailed=retainList;overviewRetry=true;history().fail('catalog-list');history().fail('warehouse');history().fail('training');scheduleExpiry();retireCacheActions();closeFilesPreview();
+  // Keep independent in-flight overview/capacity reads alive. Old list markup
+  // is display-only (all actions disabled) until a fresh catalog arrives.
+  if(!retainList){overviewRequest++;overviewAbort?.abort();overview=null;}
+  legacyCatalog=null;capacityCatalog=null;model=null;selected=null;selectedVersion=null;rail();rows();inspector();memberSpace?.render();}
  function capacity(value,id){
-  const wasWarehouse=capacities.get(id)?.storageOverview?.warehouse;capacities.set(id,value);
+  const wasWarehouse=capacities.get(id)?.storageOverview?.warehouse;if(value?.available===true||!capacities.has(id))capacities.set(id,value);
   const warehouseRole=value?.storageOverview?.protocol==='dataset-storage-node-v1'&&value.storageOverview.warehouse;
   if(value?.available===true||warehouseRole)remember('capacity',id);
   if(value?.available!==true)history().fail('training',id);
   if(wasWarehouse&&!warehouseRole)history().fail('warehouse',id);
   rail();scheduleExpiry();uploadCapacity();
  }
- async function capacitiesForOthers(){const expected=account(),token=epoch;for(const row of authorizedMachines()){if(row.id===machine()||capacities.has(row.id))continue;store.call('datasets.capacity',{machine:row.id}).then(value=>{if(current(expected,token))capacity(value,row.id);}).catch(()=>{if(current(expected,token)){capacity(null,row.id);}});}}
+ async function capacitiesForOthers(){const expected=account(),token=epoch;
+  // Overview + catalog + selected capacity already occupy three Portal reads.
+  // One supplementary read at a time respects the shared four-request guard.
+  for(const row of authorizedMachines()){
+   if(!current(expected,token))return;if(row.id===machine()||capacities.has(row.id))continue;
+   try{const value=await store.call('datasets.capacity',{machine:row.id});if(current(expected,token))capacity(value,row.id);}
+   catch{if(current(expected,token))capacity(null,row.id);}
+  }
+ }
  function uploadCapacity(){const node=section.querySelector('#v3-upload-capacity'),value=capacities.get(machine());if(node)node.textContent=adaptUploadTarget(store.data?.datasetUploadAdmission)!==null||route?.storageTier==='hdd'?'仓库':value?.available===true&&Number.isSafeInteger(value.usableBytes)&&value.usableBytes>=0?'可用 '+amount(value.usableBytes):'';}
  function uploadRoute(){const node=section.querySelector('#v3-upload-route');if(!node)return;const kind=route?.kind;
   node.className='v3-route '+(kind==='campus-direct'?'ok':kind==='tail-upload'?'alt':kind==='unreachable'?'cut':'');
@@ -495,7 +517,7 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
   }
  });
  new MutationObserver(()=>{header();cacheWatch.sync();if(document.body.dataset.room!=='datasets'){retireCacheActions();closeFilesPreview();overviewRequest++;overviewAbort?.abort();section.querySelector('#dataset-add-dialog')?.close();}}).observe(document.body,{attributes:true,attributeFilter:['data-room']});
- document.addEventListener('visibilitychange',()=>cacheWatch.sync());
+ document.addEventListener('visibilitychange',()=>{cacheWatch.sync();if(document.hidden)clearTimeout(expiryTimer);else loadOverview();});
  new MutationObserver(()=>requestAnimationFrame(fitInspector)).observe(document.body,{attributes:true,attributeFilter:['style']});
  document.fonts?.ready.then(()=>requestAnimationFrame(fitInspector));
  store.onAuthChange?.(reset);

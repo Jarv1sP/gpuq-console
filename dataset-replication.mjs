@@ -139,7 +139,14 @@ export function installDatasetReplication(service){
     // A new prepare prefers the certified original, not a second cache hop.
     // This is a control-plane journal lookup, never a peer-supplied root or a
     // new copy protocol. Existing UUIDs keep their original physical source.
-    const original=fresh?service.archiveOriginalForCopy?.(owner,selected.sourceMachine,selectedRef):null;
+    // A fresh catalog can identify this exact warehouse directly. Historical
+    // cache certifications may still name older authorities; they must not
+    // reinterpret a current original as that historical cache. Transfers still
+    // revalidate the member and fixed version at the selected source node.
+    const currentWarehouse=selected.locations.find(location=>location.machine===selected.sourceMachine&&
+      location.canUse===true&&location.warehouseReady===true&&location.originalDataset===selectedRef.dataset);
+    const original=fresh?(currentWarehouse?{machine:selected.sourceMachine,...selectedRef}:
+      service.archiveOriginalForCopy?.(owner,selected.sourceMachine,selectedRef)):null;
     const sourceMachine=fresh?(original?.machine||selected.sourceMachine):row.source;
     const sourceRef={dataset:fresh?(original?.dataset||selectedRef.dataset):row.sourceDataset,version:ref.version};
     if(!authority(owner,target).limits[sourceMachine]&&!service.archiveSourceAllowed?.(owner,sourceMachine,sourceRef)&&!service.datasetIngressSourceAllowed?.(owner,sourceMachine,sourceRef))fail('源机器未授权。',403);

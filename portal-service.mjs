@@ -4,10 +4,11 @@ import {dirname} from 'node:path';
 import {createHash,randomBytes,createCipheriv,createDecipheriv} from 'node:crypto';
 import {DemoService,credential} from './dist/service.js';
 import {readGPUQStatus,visibleGPUQStatus} from './gpuq-status.mjs';
-import {installExecution,executionCall,displayReadService,publicJob,usage,priorityCapable,priorityRankCapable} from './execution.mjs';
+import {installExecution,executionCall,publicJob,usage,priorityCapable,priorityRankCapable,TERMINAL,pendingJobReason} from './execution.mjs';
 import {MACHINES,validUsername} from './dist/model.js';
 import {installCommunity,communityCall,maintainTaskNotes} from './community.mjs';
 import {installMaintenanceState,installMaintenance,maintenanceCall} from './maintenance.mjs';
+import {installPersonalFileCampus,personalFileTicket} from './personal-file-campus.mjs';
 import {installJobNotifications} from './job-notifications.mjs';
 import {installTransfers,transferCall} from './transfers.mjs';
 import {installCloudImports,cloudImportCall} from './cloud-import.mjs';
@@ -22,13 +23,48 @@ import {installTaskDisplay,taskDisplayCall} from './task-display.mjs';
 import {installDatasetIngress,datasetUploadAdmissionView} from './dataset-ingress.mjs';
 import {installDatasetCacheActions} from './dataset-cache-actions.mjs';
 import {storageUsageCall} from './storage-usage.mjs';
+import {parseHostRootAllowlist,assertHostRootAllowed,installHostRootPolicy} from './host-root-policy.mjs';
+
+// Explicit observations (and ticket issuance/renewal) return their own receipt.
+// This only controls response presentation: authorization, dispatch and durable
+// observations still run through the existing operation and queue.
+const STATELESS_EXECUTION_RESULTS=new Set([
+  'datasets.upload.routes','datasets.upload.status','datasets.upload.direct-ticket',
+  'datasets.storage.status','datasets.storage.plan','datasets.workspace.list','datasets.workspace.get','datasets.workspace.status',
+  'datasets.snapshot.info','datasets.snapshot.manifest','datasets.snapshot.get',
+  'projects.list','projects.quota','projects.status','projects.local-import.status','projects.retire.plan','projects.retire.status',
+  'projects.label.get','projects.group.get','projects.catalog',
+  'projects.snapshot.info','projects.snapshot.manifest','projects.snapshot.get','projects.sync.status',
+  'jobs.logs','jobs.watch','jobs.diagnostics','jobs.completion','files.upload.list','terminal.status',
+]);
+
+// Aggregate history is a presentation view; point queries use durable jobs.
+const STATE_JOBS_BYTES=300000;
+function compactTerminalStateJob(job,users){
+  const view=publicJob(job,users);
+  // The browser scopes its history by the original platform user ID and uses
+  // project/release plus the confirmed AUTO receipt for outputs and allocation.
+  // Keep these public references, never reconstruct ownership from labels.
+  return {id:view.id,userId:view.userId,name:view.name,machine:view.machine,cards:view.cards,state:view.state,
+    ...(view.project!==undefined?{project:view.project}:{}),
+    ...(view.release!==undefined?{release:view.release}:{}),
+    ...(view.machineSelection!==undefined?{machineSelection:view.machineSelection}:{}),
+    ...(view.selectionSummary!==undefined?{selectionSummary:view.selectionSummary}:{}),
+    schedulerState:view.schedulerState??null,priority:view.priority??null,
+    submitter:{name:view.submitter?.name??null,username:view.submitter?.username??null},
+    createdAt:view.createdAt??null,startedAt:view.startedAt??view.workerStartedAt??null,
+    finishedAt:view.finishedAt??view.terminalObservedAt??null,
+    exitCode:view.exitCode??view.latestAttempt?.exitCode??null,
+    reason:view.reason??view.latestAttempt?.failureReason??view.error??null};
+}
 
 // One process owns this database. Serial transactions keep account changes atomic.
 // Reservations are durable before the separate restricted executor dispatches GPUQ.
 export class PortalService extends DemoService{
-  static async open(path,bootstrapPath,statusPath,bridge,notificationConfig,storageArchiveConfig,ociCohortMachines=[],datasetIngressConfig){
+  static async open(path,bootstrapPath,statusPath,bridge,notificationConfig,storageArchiveConfig,ociCohortMachines=[],datasetIngressConfig,hostRootAllowlist=process.env.GPUQ_HOST_ROOT_ALLOWLIST||'[]'){
+    const rootAllowlist=parseHostRootAllowlist(hostRootAllowlist);
     await mkdir(dirname(path),{recursive:true,mode:0o700});
-    const service=new PortalService();service.production=true;service.tail=Promise.resolve();service.pending=0;
+    const service=new PortalService();service.hostRootAllowlist=rootAllowlist;service.production=true;service.tail=Promise.resolve();service.pending=0;
     service.terminalLanes=new Map();service.terminalPending=0;
     service.cloudPending=0;service.cloudUsers=new Map();service.cloudKeys=new Set();
     service.datasetReadPending=0;
@@ -60,7 +96,7 @@ export class PortalService extends DemoService{
     service.db.prepare("UPDATE invites SET enabled=0 WHERE role='admin'").run();
     for(const user of service.store.users)user.policyVersion??=0;
     service.loginSessions=new LoginSessions(service.db,id=>service.store.users.find(user=>user.id===id),{initialPrune:!service.globalMaintenanceActive()});
-    service.statusPath=statusPath;await service.refreshGPUQ();installExecution(service,bridge);installMaintenance(service);installJobNotifications(service,notificationConfig);
+    service.statusPath=statusPath;await service.refreshGPUQ();installExecution(service,bridge);installMaintenance(service);installHostRootPolicy(service);installJobNotifications(service,notificationConfig);
     installOciCohort(service,ociCohortMachines);
     installProjectReplication(service);
     maintainTaskNotes(service);
@@ -69,6 +105,7 @@ export class PortalService extends DemoService{
     installDatasetIngress(service,datasetIngressConfig);
     installDatasetDeletion(service);
     installDatasetCacheActions(service);
+    installPersonalFileCampus(service);
     service.dummy=await credential(crypto.randomUUID(),600000);return service;
   }
   export(){return {schema:1,users:this.store.users,jobs:this.store.jobs,sequence:this.store.sequence,credentials:[...this.credentials].map(([name,r])=>[name,{salt:Buffer.from(r.salt).toString('base64'),hash:Buffer.from(r.hash).toString('base64'),iterations:r.iterations||210000}])};}
@@ -89,6 +126,31 @@ export class PortalService extends DemoService{
   enqueue(fn){
     if(this.pending>=24){const e=Error('服务忙，请稍后重试。');e.status=429;return Promise.reject(e);}
     this.pending++;const run=this.tail.then(fn);this.tail=run.catch(()=>{}).finally(()=>this.pending--);return run;
+  }
+  async readState(token,args){
+    // State uses the collector's local snapshot, never a live per-node RPC.
+    // Do not wait behind an unrelated node operation on the mutation tail.
+    if(!args||typeof args!=='object'||Array.isArray(args))throw Error('参数格式错误。');
+    if(Object.keys(args).some(key=>key!=='view')||args.view!==undefined&&args.view!=='summary')
+      throw Object.assign(Error('无效的状态查询视图。'),{status:400});
+    if(this.closing)throw Object.assign(Error('服务正在关闭。'),{status:503});
+    const admitted=this.principal(token),policy=JSON.stringify(this.store.get(admitted.userId));
+    const check=()=>{
+      if(this.closing)throw Object.assign(Error('服务正在关闭。'),{status:503});
+      const current=this.principal(token);
+      if(current.userId!==admitted.userId||current.username!==admitted.username||current.role!==admitted.role
+        ||JSON.stringify(this.store.get(current.userId))!==policy)
+        throw Object.assign(Error('账号授权已改变，请刷新后重试。'),{status:403});
+      return current;
+    };
+    this.stateReadPending??=0;
+    if(this.stateReadPending>=8)throw Object.assign(Error('状态查询繁忙，请稍后重试。'),{status:429});
+    this.stateReadPending++;
+    try{
+      if(args.view!=='summary')await this.refreshGPUQ();
+      const current=check();
+      return {state:args.view==='summary'?this.stateSummary(current):this.state(current),principal:{username:current.username,role:current.role,userId:current.userId}};
+    }finally{this.stateReadPending--;}
   }
   async remoteRead(token,operation,args){
     // These operations are observations only. A slow upload/SSH write
@@ -142,6 +204,7 @@ export class PortalService extends DemoService{
   }
   async terminalExchange(token,args){
     if(!args||typeof args!=='object'||Array.isArray(args))throw Error('参数格式错误。');
+    assertHostRootAllowed(this,this.principal(token),'terminal.exchange',args);
     // Only streaming exchanges bypass the durable mutation queue. The node
     // still validates ownership and fences every request with its writer lease.
     args={...args};const admitted=this.terminalPrincipal(token,args);
@@ -198,6 +261,51 @@ export class PortalService extends DemoService{
       this.cloudPending--;const remaining=this.cloudUsers.get(admitted.userId)-1;
       if(remaining)this.cloudUsers.set(admitted.userId,remaining);else this.cloudUsers.delete(admitted.userId);
       if(key)this.cloudKeys.delete(key);
+    }
+  }
+  async uploadRead(token,operation,args,options={}){
+    if(!['datasets.upload.routes','datasets.upload.status'].includes(operation))throw Error('Invalid upload read operation');
+    if(!args||typeof args!=='object'||Array.isArray(args))throw Error('参数格式错误。');
+    const request=structuredClone(args),principal={...this.principal(token)};
+    const policy=JSON.stringify(this.store.get(principal.userId));
+    const controller=new AbortController(),signal=controller.signal;
+    const interrupted=()=>Object.assign(Error('上传查询已取消；原上传编号和偏移不变。'),{status:499,code:'UPLOAD_READ_CANCELLED'});
+    const abort=()=>controller.abort(interrupted());
+    const check=()=>{
+      signal.throwIfAborted();
+      if(this.closing)throw Object.assign(Error('服务正在关闭。'),{status:503});
+      const current=this.principal(token);
+      if(current.userId!==principal.userId||current.username!==principal.username||current.role!==principal.role
+        ||JSON.stringify(this.store.get(current.userId))!==policy)
+        throw Object.assign(Error('账号授权已改变，请重新查询原上传。'),{status:403});
+      this.assertMaintenanceAllowed?.(operation,request,current);
+      return current;
+    };
+    if(options.signal?.aborted)abort();
+    check();
+    this.uploadReadPending??=0;
+    if(this.uploadReadPending>=4)throw Object.assign(Error('上传状态查询繁忙，请稍后重试。'),{status:429});
+    this.uploadReadPending++;
+    const started=performance.now(),timings={rpcMs:0,rpcCount:0,dbMs:0},context={signal,rpcTimeoutMs:12000,timings,check};
+    options.signal?.addEventListener('abort',abort,{once:true});
+    // No mutation enters this path. The deadline aborts the owned bridge socket;
+    // capacity stays charged until the real work settles, even with a custom bridge.
+    const timer=setTimeout(()=>controller.abort(Object.assign(Error('上传查询超时；请保留原编号稍后查询。'),{status:504,code:'UPLOAD_READ_TIMEOUT'})),25000);
+    let onAbort;
+    const cancelled=new Promise((_,reject)=>{onAbort=()=>reject(signal.reason);signal.addEventListener('abort',onAbort,{once:true});});
+    const work=Promise.resolve().then(()=>{check();return executionCall(this,principal,operation,request,context);});
+    work.then(()=>this.uploadReadPending--,()=>this.uploadReadPending--);
+    let status=200;
+    try{
+      const result=await Promise.race([work,cancelled]);check();
+      return {result,principal:{...principal}};
+    }catch(error){try{if(!signal.aborted)check();}catch(changed){error=changed;}status=error.status||500;throw error;}
+    finally{
+      clearTimeout(timer);options.signal?.removeEventListener('abort',abort);signal.removeEventListener('abort',onAbort);
+      // Aggregate timings only: no user, UUID, file, grant or ticket is logged.
+      console.info(JSON.stringify({event:'dataset-upload-read',operation,status,elapsedMs:Math.round(performance.now()-started),
+        rpcMs:Math.round(timings.rpcMs),rpcCount:timings.rpcCount,dbMs:Math.round(timings.dbMs*1000)/1000,
+        queueWaitMs:0,serializedPending:this.pending,activeReads:this.uploadReadPending}));
     }
   }
   async datasetRead(token,operation,args){
@@ -302,7 +410,9 @@ export class PortalService extends DemoService{
       this.audit(principal.username,operation,role,'ok');this.db.exec('COMMIT');return result;
     }catch(e){this.db.exec('ROLLBACK');throw e;}
   }
-  invoke(token,operation,args={}){
+  invoke(token,operation,args={},options={}){
+    if(operation==='state')return this.readState(token,args);
+    if(operation==='datasets.upload.routes'||operation==='datasets.upload.status')return this.uploadRead(token,operation,args,options);
     if(operation==='datasets.upload.admission.status'){
       if(!args||typeof args!=='object'||Array.isArray(args))throw Error('参数格式错误。');
       const principal=this.principal(token);
@@ -316,6 +426,7 @@ export class PortalService extends DemoService{
       });
     }
     if(operation==='tasks.display.get'||operation==='tasks.display.set')return taskDisplayCall(this,token,operation,args).then(result=>({result,principal:this.principal(token)}));
+    if(operation==='files.direct-ticket')return personalFileTicket(this,token,args);
     if(['host.status','files.upload.status','files.get','files.list'].includes(operation))return this.remoteRead(token,operation,args);
     if(operation==='projects.replicate'||operation==='projects.replication.status'||operation==='projects.replication.cancel'||operation==='projects.replication.retry'){
       const principal=this.principal(token);
@@ -350,7 +461,7 @@ export class PortalService extends DemoService{
       this.assertMaintenanceAllowed?.(operation,args,principal);
       if(this.datasetReadPending>=4)throw Object.assign(Error('空间统计正在读取，请稍后刷新。'),{status:429});
       this.datasetReadPending++;
-      return storageUsageCall(displayReadService(this,operation),principal,operation,args).then(result=>({result,principal:check()}))
+      return storageUsageCall(this,principal,operation,args).then(result=>({result,principal:check()}))
         .finally(()=>this.datasetReadPending--);
     }
     if(['datasets.catalog','datasets.capacity','datasets.overview','datasets.files.list','datasets.training.capabilities','datasets.list','datasets.status','datasets.prepare',
@@ -366,16 +477,22 @@ export class PortalService extends DemoService{
     if(!args||typeof args!=='object'||Array.isArray(args))throw Error('参数格式错误。');
     if(typeof operation==='string'&&operation.startsWith('cloud.auth.'))return {result:await cloudImportCall(this,principal,operation,args,()=>{if(this.closing)throw Object.assign(Error('服务正在关闭。'),{status:503});this.principal(token);}),principal:{username:principal.username,role:principal.role,userId:principal.userId}};
     if(typeof operation==='string'&&operation.startsWith('maintenance.'))return {result:await maintenanceCall(this,principal,operation,args),...(operation==='maintenance.set'?{state:this.state(principal)}:{}),principal:{username:principal.username,role:principal.role,userId:principal.userId}};
-    if(operation==='notifications.job')return {result:this.configureJobNotification(principal,args),state:this.state(principal)};
+    if(operation==='notifications.job')return {result:this.configureJobNotification(principal,args),...(Object.hasOwn(args,'enabled')?{state:this.state(principal)}:{})};
     if(typeof operation==='string'&&operation.startsWith('community.'))return {result:communityCall(this,principal,operation,args),principal:{username:principal.username,role:principal.role,userId:principal.userId}};
     // Execution writes its durable reservation before external side effects. Never
     // restore an older snapshot after a dispatch timeout (that would lose quota).
     if(typeof operation==='string'&&(operation.startsWith('jobs.')||operation.startsWith('host.')||operation.startsWith('files.')||operation.startsWith('terminal.')||operation.startsWith('datasets.')||operation.startsWith('projects.'))){
-      const result=await executionCall(this,principal,operation,args);
-      // A data chunk does not change the dashboard; avoid rebuilding and sending
-      // its full GPU/account snapshot for every 1 MiB read.
-      if(operation==='datasets.workspace.get')return {result,principal:{username:principal.username,role:principal.role,userId:principal.userId}};
-      return {result,state:this.state(principal),principal:{username:principal.username,role:principal.role,userId:principal.userId}};
+      const stateless=STATELESS_EXECUTION_RESULTS.has(operation),policy=stateless?JSON.stringify(this.store.get(principal.userId)):null;
+      const check=()=>{
+        const current=this.principal(token);
+        if(this.closing||current.userId!==principal.userId||current.username!==principal.username||current.role!==principal.role
+          ||JSON.stringify(this.store.get(current.userId))!==policy)
+          throw Object.assign(Error('账号授权已改变，请重新查询原操作。'),{status:403});
+        return current;
+      };
+      let result;try{result=await executionCall(this,principal,operation,args);}finally{if(stateless)check();}
+      const omitState=stateless||operation==='jobs.submit'&&options.omitResponseState===true;
+      return {result,...(omitState?{}:{state:this.state(principal)}),principal:{username:principal.username,role:principal.role,userId:principal.userId}};
     }
     const before=structuredClone(this.export()),sessions=new Map(this.sessions);
     try{
@@ -389,9 +506,8 @@ export class PortalService extends DemoService{
         try{this.invalidate(user.username);this.credentials.delete(user.username);this.store.users=this.store.users.filter(u=>u.id!==user.id);this.save();this.audit(actor,operation,user.id,'ok');this.db.exec('COMMIT');}catch(e){this.db.exec('ROLLBACK');throw e;}
         this.syncOciAccountEvent();return {result:{deleted:true},state:this.state(principal)};
       }
-      if(typeof operation==='string'&&operation.startsWith('invites.'))return {result:this.manageInvites(principal,operation,args),state:this.state(principal),principal:{username:principal.username,role:principal.role,userId:principal.userId}};
+      if(typeof operation==='string'&&operation.startsWith('invites.'))return {result:this.manageInvites(principal,operation,args),...(operation==='invites.list'?{}:{state:this.state(principal)}),principal:{username:principal.username,role:principal.role,userId:principal.userId}};
       if(operation==='request'||operation==='release'){const e=Error('真实 GPUQ 提交尚未开放；不会模拟占卡或启动训练。');e.status=503;throw e;}
-      if(operation==='state')await this.refreshGPUQ();
       if(operation==='policy.full'){
         if(principal.role!=='admin')throw Object.assign(Error('此操作需要管理员权限。'),{status:403});
         args={userId:args.userId,policyVersion:args.policyVersion,limits:Object.fromEntries(MACHINES.map(m=>[m.id,m.cards])),total:MACHINES.reduce((n,m)=>n+m.cards,0)};operation='policy.save';
@@ -413,14 +529,58 @@ export class PortalService extends DemoService{
       return {...result,principal:operation==='logout'?null:{username:principal.username,role:principal.role,userId:principal.userId}};
     }catch(e){this.restore(before);this.sessions=sessions;this.audit(actor,operation,args?.userId||args?.jobId,'denied');throw e;}
   });}
-  async refreshGPUQ(){this.gpuq=await readGPUQStatus(this.statusPath);}
+  async refreshGPUQ(){
+    // Keep one actual file read in flight, even after the response deadline.
+    // A stalled filesystem cannot accumulate unbounded background reads.
+    if(!this.gpuqReadWork){
+      const work=readGPUQStatus(this.statusPath);this.gpuqReadWork=work;
+      const release=()=>{if(this.gpuqReadWork===work)this.gpuqReadWork=null;};
+      work.then(release,release);
+    }
+    let timer;
+    try{
+      this.gpuq=await Promise.race([this.gpuqReadWork,new Promise(resolve=>{
+        timer=setTimeout(()=>resolve({checkedAt:null,stale:true,hosts:[]}),2000);
+      })]);
+    }finally{clearTimeout(timer);}
+  }
+  stateSummary(principal){
+    // Construct only preflight metadata. Calling state() then deleting jobs
+    // would still clone and decorate the complete job/process history.
+    const own=this.store.get(principal.userId),admin=principal.role==='admin';
+    const users=admin?this.store.users.map(user=>this.store.get(user.id)):[own];
+    const machines=MACHINES.filter(machine=>admin||own.limits[machine.id]);
+    const checked=Date.parse(this.gpuq?.checkedAt),age=Date.now()-checked;
+    const fresh=this.gpuq?.stale===false&&Number.isFinite(age)&&age>=-30000&&age<=180000;
+    return {summaryVersion:1,machines:structuredClone(machines),users,demo:false,mode:'persistent',
+      gpuqConnected:fresh&&this.gpuq.hosts.some(host=>host.gpuq.connected),jobsSimulated:false,
+      executionEnabled:this.executionEnabled===true,taskMetadata:{version:1},
+      maintenance:{version:1,retired:true,readOnly:true},operationalMaintenance:this.operationalMaintenance?.(principal),
+      datasetUploadAdmission:datasetUploadAdmissionView(this.datasetIngressPolicy,this.datasetArchiveCapability)};
+  }
   state(principal){
     const state=super.state(principal);
     const snapshot=this.taskDisplaySnapshot(this.gpuq||{checkedAt:null,stale:true,hosts:[]});
-    state.jobs=state.jobs.map(j=>this.taskDisplayJob(j));
+    const visible=state.jobs.map(j=>this.taskDisplayJob(j)),jobsTotal=visible.length;
     const gpuq=visibleGPUQStatus(snapshot,principal,this.store.get(principal.userId).limits,{jobs:this.store.jobs.map(j=>this.taskDisplayJob(j)),users:this.store.users});
     const capabilities=Object.fromEntries(gpuq.hosts.map(h=>[h.id,!gpuq.stale&&priorityCapable(h)===true]));
-    return {...state,taskMetadata:{version:1},maintenance:{version:1,retired:true,readOnly:true},operationalMaintenance:this.operationalMaintenance?.(principal),jobs:state.jobs.map(j=>({...publicJob(j,this.store.users),notifications:this.jobNotificationState(j,principal.userId),canSetPriority:principal.role==='admin'&&!gpuq.stale&&priorityRankCapable(gpuq.hosts.find(h=>h.id===j.machine))===true&&j.state==='PENDING'&&!j.cancelRequested&&j.priorityMutable===true&&(j.spec?.preemptIdleOnly===true||!!j.spec?.scheduling)})),
+    const full=job=>({...publicJob(job,this.store.users),queueReason:pendingJobReason(this,job),notifications:this.jobNotificationState(job,principal.userId),
+      canSetPriority:principal.role==='admin'&&!gpuq.stale&&priorityRankCapable(gpuq.hosts.find(h=>h.id===job.machine))===true&&job.state==='PENDING'&&!job.cancelRequested&&job.priorityMutable===true&&(job.spec?.preemptIdleOnly===true||!!job.spec?.scheduling)});
+    const selected=new Map(visible.filter(job=>!TERMINAL.has(job.state)).map(job=>[job,full(job)]));
+    // Full active records take precedence even when they alone exceed budget.
+    let jobsBytes=2;
+    for(const view of selected.values())jobsBytes+=Buffer.byteLength(JSON.stringify(view))+(jobsBytes>2?1:0);
+    const terminal=visible.map((job,index)=>({job,index,time:Date.parse(job.finishedAt??job.terminalObservedAt)}))
+      .filter(row=>TERMINAL.has(row.job.state)).sort((a,b)=>(Number.isFinite(b.time)?b.time:0)-(Number.isFinite(a.time)?a.time:0)||b.index-a.index);
+    for(const {job} of terminal){
+      const view=compactTerminalStateJob(job,this.store.users),bytes=Buffer.byteLength(JSON.stringify(view))+(selected.size?1:0);
+      if(jobsBytes+bytes>STATE_JOBS_BYTES)break;
+      selected.set(job,view);jobsBytes+=bytes;
+    }
+    // Preserve the legacy append order used by CLI jobs' final-50 display.
+    const jobs=visible.filter(job=>selected.has(job)).map(job=>selected.get(job));
+    return {...state,jobs,jobsTotal,jobsReturned:jobs.length,jobsTruncated:jobs.length<jobsTotal,jobsCompacted:true,
+      taskMetadata:{version:1},maintenance:{version:1,retired:true,readOnly:true},operationalMaintenance:this.operationalMaintenance?.(principal),
       demo:false,mode:'persistent',gpuqConnected:gpuq.hosts.some(h=>h.gpuq.connected),jobsSimulated:false,executionEnabled:this.executionEnabled===true,
       execution:{priorityCapabilities:capabilities},gpuq,transfers:{version:1},
       // Protocol availability is a Portal policy fact, not a node/mount or

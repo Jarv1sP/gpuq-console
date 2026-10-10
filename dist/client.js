@@ -16,7 +16,7 @@ export class DemoClient{
         if(controller.signal.aborted)throw cause;
         throw Object.assign(Error([502,503,504].includes(response.status)?'服务暂时不可用，稍后重试':'服务响应无法确认，请稍后重试。'),{status:response.status});
       }
-      if(!response.ok){const e=Error(typeof data?.error==='string'?data.error:[502,503,504].includes(response.status)?'服务暂时不可用，稍后重试':'请求失败');e.status=response.status;if(['LAST_COPY_UNPROVEN','DATASET_REMOVAL_PENDING','DATASET_DELETE_UNSUPPORTED','MAINTENANCE_ACTIVE','SUBMISSION_REJECTED'].includes(data?.code)||body?.operation==='datasets.upload.admission.status'&&response.status===404&&data?.code==='DATASET_ADMISSION_ABSENT')e.code=data.code;if([409,503].includes(response.status)&&e.code==='SUBMISSION_REJECTED'&&data.storage?.protocol===1)e.storage=data.storage;throw e;}
+      if(!response.ok){const e=Error(typeof data?.error==='string'?data.error:[502,503,504].includes(response.status)?'服务暂时不可用，稍后重试':'请求失败');e.status=response.status;if(['LAST_COPY_UNPROVEN','DATASET_REMOVAL_PENDING','DATASET_DELETE_UNSUPPORTED','MAINTENANCE_ACTIVE','SUBMISSION_REJECTED'].includes(data?.code))e.code=data.code;if([409,503].includes(response.status)&&e.code==='SUBMISSION_REJECTED'&&data.storage?.protocol===1)e.storage=data.storage;throw e;}
       return data;
     })(),timeout,cancelled]);}finally{clearTimeout(timer);if(onAbort)signal.removeEventListener('abort',onAbort);}
   }

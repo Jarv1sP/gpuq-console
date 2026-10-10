@@ -4,7 +4,7 @@ import {resolve} from 'node:path';
 import {createHash,randomUUID} from 'node:crypto';
 
 const HASH=/^[a-f0-9]{64}$/;
-const MAX=100*1024**3,CHUNK=1024**2;
+const LARGE_FILE_BYTES=100*1024**3,CHUNK=1024**2;
 const fail=message=>{throw Error(message);};
 const stamp=info=>[info.dev,info.ino,info.size,info.mtimeNs,info.ctimeNs,info.mode,info.nlink].map(String);
 const same=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
@@ -22,10 +22,10 @@ async function checkpoint(path,value,previous){
 
 // A partial belongs to one authenticated account and exact remote file. It is
 // never adopted from a pre-existing destination without this private receipt.
-export async function downloadFile(call,{machine,context={},path,destination,origin,userId}){
+export async function downloadFile(call,{machine,context={},path,destination,origin,userId,getChunkBytes=()=>CHUNK,onWarning=size=>console.error(`下载文件超过 100 GiB（${size} B），仍允许分块下载；请确认本地磁盘空间。`)}){
   const target=resolve(destination),receiptPath=target+'.gpuctl-download.json';
   const identity={origin,userId,machine,path,project:context.project??null,area:context.area??null,runId:context.runId??null};
-  let receipt,receiptStamp,file,localStamp,offset=0,fingerprint,size,resumed=false;
+  let receipt,receiptStamp,file,localStamp,offset=0,fingerprint,size,resumed=false,warned=false;
   const digest=createHash('sha256');
   const saved=await missing(receiptPath),local=await missing(target);
   if(saved){
@@ -37,7 +37,7 @@ export async function downloadFile(call,{machine,context={},path,destination,ori
       if(!same(stamp(await record.stat({bigint:true})),stamp(saved)))fail('Download receipt changed');
     }finally{await record.close();}
     if(!receipt||Object.keys(receipt).sort().join(',')!=='fingerprint,identity,localStamp,offset,protocol,sha256,size'||receipt.protocol!==2||!same(receipt.identity,identity)
-      ||!HASH.test(receipt.fingerprint||'')||!HASH.test(receipt.sha256||'')||!Number.isSafeInteger(receipt.size)||receipt.size<0||receipt.size>MAX
+      ||!HASH.test(receipt.fingerprint||'')||!HASH.test(receipt.sha256||'')||!Number.isSafeInteger(receipt.size)||receipt.size<0
       ||!Number.isSafeInteger(receipt.offset)||receipt.offset<0||receipt.offset>receipt.size||BigInt(receipt.offset)!==local.size||!same(receipt.localStamp,stamp(local)))
       fail('Download identity or local partial changed; files preserved');
     receiptStamp=stamp(saved);offset=receipt.offset;fingerprint=receipt.fingerprint;size=receipt.size;resumed=true;
@@ -57,15 +57,21 @@ export async function downloadFile(call,{machine,context={},path,destination,ori
   try{
     for(;;){
       const value=(await call('files.get',{machine,path,offset,...context,...(fingerprint?{fingerprint}:{})})).result;
-      if(!value||value.path!==path||value.offset!==offset||!Number.isSafeInteger(value.size)||value.size<0||value.size>MAX||typeof value.eof!=='boolean'
-        ||typeof value.data!=='string'||value.data.length>Math.ceil(CHUNK/3)*4||! /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value.data))fail('Invalid download chunk; partial preserved');
+      const chunkBytes=getChunkBytes();
+      if(![CHUNK,16*CHUNK].includes(chunkBytes))fail('Invalid negotiated download bound; partial preserved');
+      if(!value||value.path!==path||value.offset!==offset||!Number.isSafeInteger(value.size)||value.size<0||typeof value.eof!=='boolean'
+        ||typeof value.data!=='string'||value.data.length>Math.ceil(chunkBytes/3)*4)fail('Invalid download chunk; partial preserved');
       const bytes=Buffer.from(value.data,'base64');
-      if(size!==undefined&&size!==value.size||offset+bytes.length>value.size||value.eof!==(offset+bytes.length===value.size)||!bytes.length&&!value.eof)fail('Download size or offset changed; partial preserved');
+      // Exact canonical encoding avoids a grouped regex whose backtracking
+      // stack overflows on a valid negotiated 16 MiB response.
+      if(bytes.toString('base64')!==value.data)fail('Invalid download chunk; partial preserved');
+      if(bytes.length>chunkBytes||size!==undefined&&size!==value.size||offset+bytes.length>value.size||value.eof!==(offset+bytes.length===value.size)||!bytes.length&&!value.eof)fail('Download size or offset changed; partial preserved');
       if(value.protocol===2){
         if(!HASH.test(value.fingerprint||'')||fingerprint&&fingerprint!==value.fingerprint)fail('Download source changed; partial preserved');
         fingerprint=value.fingerprint;
       }else if(fingerprint)fail('Node no longer confirms the original download identity; partial preserved');
       size=value.size;
+      if(!warned&&size>LARGE_FILE_BYTES){onWarning(size);warned=true;}
       if(!file){file=await open(target,constants.O_RDWR|constants.O_CREAT|constants.O_EXCL,0o600);localStamp=stamp(await file.stat({bigint:true}));}
       const current=await file.stat({bigint:true});
       if(!same(stamp(current),localStamp)||!same(stamp(await lstat(target,{bigint:true})),localStamp))fail('Local download file changed; partial preserved');

@@ -36,19 +36,28 @@ export function validateUploadRoutes(value,machine){
     if(Object.keys(route).sort().join(',')!=='endpoint,id,kind'||!id.test(route.id)||ids.has(route.id)||
       !['campus-direct','tail-upload'].includes(route.kind)||index===0&&(route.id!=='primary'||route.kind!=='campus-direct')||
       url.protocol!=='https:'||url.username||url.password||url.search||url.hash||url.pathname!=='/'||url.origin!==route.endpoint||origins.has(url.origin))fail();
+    if(route.id==='node-lan'){
+      const parts=url.hostname.split('.');const [a,b]=parts.map(Number);
+      if(parts.length!==4||parts.some(p=>!/^(0|[1-9][0-9]{0,2})$/.test(p)||Number(p)>255)||!(a===10||a===172&&b>=16&&b<=31||a===192&&b===168))fail();
+    }
     ids.add(route.id);origins.add(url.origin);
     return Object.freeze({...route,protocol,machine,revision:value.revision,certificateSha256:value.certificateSha256});
   });
   return routes;
 }
 export async function selectUploadRoute(value,machine,probe,{signal}={}){
-  const routes=validateUploadRoutes(value,machine),routeFailures=[];
+  // Validate legacy descriptors completely, but never probe their Tail routes.
+  // Ordinary members only need a reachable campus HTTPS entry.
+  const approved=validateUploadRoutes(value,machine).filter(route=>route.kind==='campus-direct');
+  const primary=approved[0],lan=approved.find(route=>route.id==='node-lan');
+  const routes=lan?[lan,primary]:approved,routeFailures=[];
   for(const route of routes){
     if(signal?.aborted)throw signal.reason||Error('Upload canceled');
     try{
-      const observed=await probe(route);
+      const candidate=lan?{...primary,dialEndpoint:route.endpoint,probeTimeoutMs:route.id==='node-lan'?1000:2500}:route;
+      const observed=await probe(candidate);
       if(observed?.protocol===protocol&&observed.listenerReady===true&&observed.machine===machine&&observed.revision===route.revision)
-        return route;
+        return lan?{...primary,dialEndpoint:route.endpoint,routes:[primary,lan].map(({id,kind,endpoint})=>({id,kind,endpoint}))}:route;
       const code=observed?.protocol!==protocol?'PROTOCOL_MISMATCH':observed.listenerReady!==true?'LISTENER_NOT_READY':
         observed.machine!==machine?'NODE_MISMATCH':'REVISION_MISMATCH';
       routeFailures.push({routeId:route.id,code});

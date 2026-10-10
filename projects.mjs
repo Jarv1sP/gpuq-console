@@ -20,7 +20,7 @@ export async function projectCall(service,principal,user,operation,args,authoriz
   const ownerOnly=['projects.list','projects.quota'].includes(operation);
   const allowed=ownerOnly?['machine']:['machine','project'];
   if(operation==='projects.create')allowed.push('environmentMode');
-  if(operation==='projects.publish')allowed.push('key');
+  if(operation==='projects.publish')allowed.push('key','inheritRelease');
   if(['projects.archive','projects.unarchive','projects.retire'].includes(operation))allowed.push('revision');
   if(['projects.retire','projects.retire.status'].includes(operation))allowed.push('key');
   if(operation==='projects.retire')allowed.push('manifestSha256');
@@ -28,6 +28,8 @@ export async function projectCall(service,principal,user,operation,args,authoriz
   if(operation==='projects.local-import.begin')allowed.push('sourcePath','destinationPath');
   if(Object.keys(args).some(k=>!allowed.includes(k)))fail('项目参数无效。');
   if(args.key!==undefined&&(typeof args.key!=='string'||!UUID.test(args.key)))fail('发布标识必须是完整 UUID。');
+  if(args.inheritRelease!==undefined&&(typeof args.inheritRelease!=='string'||args.inheritRelease!=='latest'&&!RELEASE.test(args.inheritRelease)))fail('继承环境须指定完整 READY 版本或 latest。');
+  if(args.inheritRelease!==undefined&&args.key===undefined)fail('继承环境须提供固定的发布 UUID；回执未确认时沿用原 UUID。');
   if(['projects.archive','projects.unarchive','projects.retire'].includes(operation)&&(!Number.isSafeInteger(args.revision)||args.revision<0||args.revision>=Number.MAX_SAFE_INTEGER))fail('请使用当前项目生命周期 revision。');
   if(['projects.retire','projects.retire.status'].includes(operation)&&!UUID.test(args.key||''))fail('退役须使用固定完整 UUID。');
   if(operation==='projects.retire'&&!RELEASE.test(args.manifestSha256||''))fail('退役须使用准确的清单摘要。');
@@ -44,7 +46,7 @@ export async function projectCall(service,principal,user,operation,args,authoriz
   if(operation==='projects.retire'&&priorJobs.length)fail('项目有任务历史，不能退役；请归档以保留结果。',409);
   if(operation==='projects.archive'&&priorJobs.some(job=>!['SUCCEEDED','FAILED','CANCELED'].includes(job.state)&&!job.nodeJobId))fail('已有任务尚未确认派发到节点；先核对其原状态，再归档项目。',409);
   const policy=JSON.stringify(user);
-  const result=await service.bridge(args.machine,operation,{...reference,...(operation==='projects.create'?{environmentMode:'oci'}:{}),...(args.key!==undefined?{key:args.key}:{}),...(args.revision!==undefined?{revision:args.revision}:{}),...(args.manifestSha256!==undefined?{manifestSha256:args.manifestSha256}:{}),...(operation==='projects.local-import.begin'?{sourcePath:args.sourcePath,destinationPath:args.destinationPath}:{}),userId:user.id});
+  const result=await service.bridge(args.machine,operation,{...reference,...(operation==='projects.create'?{environmentMode:'oci'}:{}),...(args.key!==undefined?{key:args.key}:{}),...(args.inheritRelease!==undefined?{inheritRelease:args.inheritRelease}:{}),...(args.revision!==undefined?{revision:args.revision}:{}),...(args.manifestSha256!==undefined?{manifestSha256:args.manifestSha256}:{}),...(operation==='projects.local-import.begin'?{sourcePath:args.sourcePath,destinationPath:args.destinationPath}:{}),userId:user.id});
   if(JSON.stringify(service.store.get(user.id))!==policy)fail('账号权限已改变，请重新查询原操作状态。',403);
   if(operation==='projects.create'&&(result?.project!==args.project||result.environmentMode!=='oci'))fail('服务器未确认个人容器项目；请查询原项目，不会回退或新建替代环境。',503);
   if(operation==='projects.quota')return quotaStatus(result,user.id);

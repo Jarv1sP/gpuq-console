@@ -5,6 +5,9 @@
 !package.json
 !package-lock.json
 !scripts/build-client.mjs
+!scripts/build-campus-native.mjs
+!scripts/campus-go-toolchain.mjs
+!native/campus-http/**
 !docs/USER_GUIDE.md
 !deploy/Dockerfile
 !deploy/install-client.sh

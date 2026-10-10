@@ -4,7 +4,8 @@ COPY package.json package-lock.json ./
 RUN npm ci --ignore-scripts
 COPY *.mjs ./
 COPY dist ./dist
-COPY scripts/build-client.mjs ./scripts/
+COPY scripts/build-client.mjs scripts/build-campus-native.mjs scripts/campus-go-toolchain.mjs ./scripts/
+COPY native/campus-http ./native/campus-http
 RUN npm run build:client
 RUN npm prune --omit=dev --ignore-scripts
 
@@ -29,6 +30,7 @@ COPY --chown=root:root deploy/install-client.sh deploy/install-client.ps1 ./depl
 COPY --chown=root:root transfers.mjs ./
 COPY --chown=root:root login-sessions.mjs ./
 COPY --chown=root:root native-task-metadata.mjs job-observation.mjs ./
+COPY --chown=root:root host-root-policy.mjs personal-file-campus.mjs campus-upload-policy.mjs ./
 USER node
 # Load the final image's module graph as its runtime user. Importing the Portal
 # does not start it, open SQLite or contact the execution bridge.

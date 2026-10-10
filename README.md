@@ -136,3 +136,6 @@ Docker 在构建阶段生成产物，运行容器不含 esbuild。源码仍可�
 ## 许可证与致谢
 
 本项目原创部分采用 [MIT](LICENSE)。GPUQ 源码来自本项目既有实验室部署的 source zipapp，经整理纳入仓库；不是把某个同名第三方项目改名为原创。Tailscale、Headscale、OpenSSH、Caddy、xterm.js、bubblewrap、slirp4netns 等均为独立上游项目，详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。NVIDIA 驱动/CUDA 不属于本仓库开源代码，也不随仓库分发。
+# Current production source
+
+Portal/CLI production `e6cce52` is available on `release/production-e6cce52` and tag `production-e6cce52`. See [source/version mapping](docs/PRODUCTION_SYNC.md).

@@ -5,6 +5,7 @@ import {createHash,randomUUID} from 'node:crypto';
 import {remoteSnapshot} from './client-snapshot-sync.mjs';
 import {dataPath,scanLocalDataset,uploadDatasetSnapshot,snapshotKey,DATA_CHUNK,sameDatasetFile} from './client-data-upload.mjs';
 import {transferUploadCall} from './dist/transfer-upload.js';
+import {createCampusDownloadSnapshot} from './client-campus-snapshot.mjs';
 const fail=message=>{throw Error(message);};
 const safe=value=>String(value??'').replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu,c=>'\\u{'+c.codePointAt(0).toString(16)+'}');
 export function transferText(row){const result=row.result||{},bytes=result.bytes??(result.totalBytes!==undefined&&result.remainingBytes!==undefined?result.totalBytes-result.remainingBytes:0),total=result.totalBytes??row.snapshot?.totalBytes??row.manifest?.totalBytes;return `${safe(row.id)} · ${safe(row.kind)} · ${safe(row.from?row.from+' → '+row.machine:row.machine)} · ${safe(row.state)}\n  ${bytes} / ${total??'?'} bytes${result.path?' · '+safe(result.path):''}${row.error||result.error?'\n  '+safe(row.error||result.error):''}`;}
@@ -45,7 +46,7 @@ async function publishReceipt(path,value){
 async function hashFile(file,size){const buffer=Buffer.alloc(DATA_CHUNK),hash=createHash('sha256');for(let at=0;at<size;){const {bytesRead}=await file.read(buffer,0,Math.min(buffer.length,size-at),at);if(!bytesRead)fail('Incomplete local file');hash.update(buffer.subarray(0,bytesRead));at+=bytesRead;}return hash.digest('hex');}
 function codepointOrder(a,b){const x=Array.from(a),y=Array.from(b);for(let i=0;i<Math.min(x.length,y.length);i++){const n=x[i].codePointAt(0)-y[i].codePointAt(0);if(n)return n;}return x.length-y.length;}
 function canonicalDigest(raw){const m=JSON.parse(raw);return createHash('sha256').update(JSON.stringify({directories:m.directories.sort(codepointOrder),files:m.files.sort((a,b)=>codepointOrder(a.path,b.path)).map(({path,size,sha256})=>({path,sha256,size})),schema:1})).digest('hex');}
-export async function downloadTransfer(call,{machine,dataset,version,destination,key,progress=()=>{}}){
+export async function downloadTransfer(call,{machine,dataset,version,destination,key,progress=()=>{},snapshotFactory=createCampusDownloadSnapshot}){
   key||=snapshotKey(['download',machine,dataset,version,resolve(destination)]);
   const row=(await call('transfers.create',{key,kind:'download',machine,dataset,version})).result;progress('HANDLE',{transferId:row.id});
   const target=resolve(destination),partial=target+'.gpuq-partial-'+row.id;
@@ -67,10 +68,11 @@ export async function downloadTransfer(call,{machine,dataset,version,destination
   const controller=new AbortController(),stop=()=>controller.abort(Error('Local client interrupted; partial payload retained'));
   const signals=['SIGINT','SIGTERM','SIGHUP'];for(const signal of signals)process.on(signal,stop);
   const request=(op,args)=>{if(controller.signal.aborted)throw controller.signal.reason;return call(op,args,controller.signal);};
+  let campus;
   try{
     if(finalized){const scan=await scanLocalDataset(root,()=>{});if(canonicalDigest(scan.manifest)!==row.snapshot.manifestSha256)fail('Completed local directory changed; choose a new destination and key');if(row.state!=='SUCCEEDED')await call('transfers.progress',{id:row.id,bytes:scan.totalBytes,complete:true});return {transferId:row.id,state:'SUCCEEDED',downloaded:target,bytes:scan.totalBytes};}
-    const adapter=async(op,args)=>{const action=op.slice('datasets.snapshot.'.length),{machine,dataset,version,...fields}=args;return request('transfers.io',{id:row.id,action,...fields});};
-    const scan=await remoteSnapshot(adapter,'datasets',{machine,dataset,version},progress),manifest=JSON.parse(scan.manifest);
+    campus=snapshotFactory(request,{machine,downloadId:row.id,manifestSha256:row.snapshot.manifestSha256});
+    const scan=await remoteSnapshot((op,args)=>campus.call(op,args),'datasets',{machine,dataset,version},progress),manifest=JSON.parse(scan.manifest);
     if(scan.manifestSha256!==row.snapshot.manifestSha256)fail('Fixed source manifest changed after transfer registration');
     const names=new Set();for(const path of [...manifest.directories,...manifest.files.map(f=>f.path)]){dataPath(path);if(names.has(path))fail('Duplicate manifest path');names.add(path);}
     for(const folder of manifest.directories){await mkdir(join(root,folder),{recursive:true,mode:0o700});await realDirectory(join(root,folder));}
@@ -91,5 +93,5 @@ export async function downloadTransfer(call,{machine,dataset,version,destination
     if(await exists(target))fail('Destination appeared during download; no overwrite performed');await rename(partial,target);
     await call('transfers.progress',{id:row.id,bytes:transferred,complete:true});return {transferId:row.id,state:'SUCCEEDED',downloaded:target,bytes:transferred};
   }catch(error){throw Error(error.message+'\n传输：'+row.id+'；重新执行原 download 命令续传。断点目录：'+partial);}
-  finally{for(const signal of signals)process.off(signal,stop);await lock.close();await unlink(lockPath);}
+  finally{for(const signal of signals)process.off(signal,stop);try{await campus?.close();}finally{await lock.close();await unlink(lockPath);}}
 }

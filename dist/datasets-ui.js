@@ -182,7 +182,11 @@ export function datasetAccess(version,catalog,{machineAuthorized=true}={}){
   const ready=localAllowed&&state==='READY'&&local.state==='READY';
   const remote=typeof version.sourceMachine==='string'&&version.sourceMachine!==catalog.machine&&version.locations?.some(row=>row.machine===version.sourceMachine&&row.state==='READY'&&row.canUse===true);
   const original=target&&hasReadableLocalOriginal(version,catalog.machine);
-  const canPrepare=target&&version.canUse===true&&version.canPrepare===true&&(localAllowed||remote===true||original);
+  // Production training storage has no cross-node preparation capability.
+  // A remote READY copy is an observation, not permission to copy it here.
+  const crossNode=catalog.crossNodeEnabled===true&&remote===true;
+  const localPreparation=localAllowed&&state!=='NOT_LOCAL'&&(!version.sourceMachine||version.sourceMachine===catalog.machine);
+  const canPrepare=target&&version.canUse===true&&version.canPrepare===true&&(localPreparation||crossNode||original);
   const prepare=canPrepare&&['REGISTERED','STAGING','FAILED','NOT_LOCAL'].includes(state);
   const selectable=ready||localAllowed&&state==='PREPARING'||canPrepare&&(['REGISTERED','STAGING','PREPARING'].includes(state)||state==='NOT_LOCAL'&&(remote||original));
   const browseOnly=version.canUse!==true||!target||!localAllowed&&!canPrepare&&version.locations?.some(row=>row.machine===catalog.machine&&row.canUse!==true);
@@ -194,6 +198,7 @@ export function datasetAuthorizedMachines(store){
 }
 export function datasetCopyRoute(version,catalog){
   const source=version.sourceMachine,target=catalog.machine;
+  if(catalog.crossNodeEnabled!==true)return null;
   if(version.state!=='NOT_LOCAL'||version.canUse!==true||version.canPrepare!==true||typeof source!=='string'||!source||source===target)return null;
   const machines=datasetMachines(catalog);
   if(!machines.some(row=>row.machine===source)||!machines.some(row=>row.machine===target&&row.state==='ok'))return null;
@@ -397,11 +402,11 @@ export function datasetsUI(store,toast){
     const selected=section.querySelector('[name=dataset-machine]')?.value,machine=machineAllowed(selected)?selected:null;
     busy=true;const token=++generation,expected=account(),button=section.querySelector('#datasets-refresh'),select=section.querySelector('[name=dataset-machine]');button.disabled=true;select.disabled=true;
     const valid=()=>token===generation&&current(expected)&&(section.querySelector('[name=dataset-machine]')?.value||null)===machine&&(machine===null||machineAllowed(machine));
-    const status=section.querySelector('#datasets-status'),capacity=section.querySelector('#datasets-capacity');catalog=null;capacity.hidden=!machine;status.textContent=status.dataset.reason==='policy-change'?'授权已更新，读取目录…':'加载中…';capacity.innerHTML=datasetCapacityHTML(null,machine);databaseLedger(null);section.querySelector('#dataset-catalog').replaceChildren();
+    const status=section.querySelector('#datasets-status'),capacity=section.querySelector('#datasets-capacity');capacity.hidden=!machine;status.textContent=status.dataset.reason==='policy-change'?'授权已更新，读取目录…':'加载中…';if(!catalog){capacity.innerHTML=datasetCapacityHTML(null,machine);databaseLedger(null);}
     warehouse.beginRead();warehouse.render();warehouse.capacitiesForOthers();warehouse.loadOverview();
     try{await Promise.all([
-      store.call('datasets.catalog',{machine}).then(result=>{if(!valid())return;if(result.machine!==machine)throw Error('返回目录与所选服务器不符，请刷新。');catalog=result;warehouse.catalog(catalog);status.textContent=result.partial?'部分目录待确认':'';delete status.dataset.reason;}).catch(error=>{if(valid()){catalog=null;warehouse.catalogUnavailable();status.textContent='目录未能确认：'+error.message;}}),
-      ...(machine?[store.call('datasets.capacity',{machine}).then(result=>{if(valid()){capacity.innerHTML=datasetCapacityHTML(result,machine);warehouse.capacity(result,machine);}}).catch(()=>{if(valid()){capacity.innerHTML=datasetCapacityHTML(null,machine);warehouse.capacity(null,machine);}})]:[])
+      store.call('datasets.catalog',{machine}).then(result=>{if(!valid())return;if(result.machine!==machine)throw Error('返回目录与所选服务器不符，请刷新。');catalog=result;warehouse.catalog(catalog);status.textContent=result.loading?'读取中':result.stale?'上次目录 · 后台刷新中':result.partial?'部分目录待确认':'';delete status.dataset.reason;}).catch(error=>{if(valid()){if([401,403].includes(error.status)){catalog=null;warehouse.reset();status.textContent=error.message;}else{warehouse.catalogUnavailable();status.textContent=catalog?'上次目录 · 正在重试':'读取中';}}}),
+      ...(machine?[store.call('datasets.capacity',{machine}).then(result=>{if(valid()){capacity.innerHTML=datasetCapacityHTML(result,machine);warehouse.capacity(result,machine);}}).catch(()=>{if(valid()){warehouse.capacity(null,machine);}})]:[])
     ]);}
     finally{if(token===generation){busy=false;controls();}}
   }

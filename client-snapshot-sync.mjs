@@ -8,6 +8,7 @@ import {promisify} from 'node:util';
 import {Transform} from 'node:stream';
 import {pipeline} from 'node:stream/promises';
 import {DATA_CHUNK,dataPath,snapshotKey,scanLocalDataset,uploadDatasetSnapshot} from './client-data-upload.mjs';
+import {createCampusDownloadSnapshot} from './client-campus-snapshot.mjs';
 const fail=message=>{throw Error(message);};
 const runFile=promisify(execFile);
 const utf8=bytes=>new TextDecoder('utf-8',{fatal:true}).decode(bytes);
@@ -103,7 +104,7 @@ export async function syncCodeSnapshot(call,{machine,project,key,scan,progress})
   await scan.verify();const out=await request('finish');if(out.state!=='CODE_READY')fail('Target did not confirm complete code snapshot');return {...out,machine};
 }
 
-export async function runManualSync(call,{options,positionals,training,machines,userId}){
+export async function runManualSync(call,{options,positionals,training,machines,userId,snapshotFactory=createCampusDownloadSnapshot}){
   const state={machines},session={principal:{userId}},machineName=value=>{const exact=machines.find(m=>m.id===value);if(exact)return exact.id;const short=machines.filter(m=>m.id.endsWith('-'+value));return short.length===1?short[0].id:value;};
   const projectSlug=value=>{if(typeof value!=='string'||!/^[a-z][a-z0-9_-]{0,47}$/.test(value))fail('Project must use a new lowercase project slug');return value;};
   if(['status','cancel'].includes(positionals[1])){
@@ -142,11 +143,35 @@ export async function runManualSync(call,{options,positionals,training,machines,
       if(mode==='git'&&options.from)fail('Git sync source is the local repository, not --from');
       const project=mode==='code'?projectSlug(options['target-project']):mode==='git'?projectSlug(options.project):null;
       let last=0;const progress=(phase,value)=>{if(Date.now()-last>1000||phase==='HANDLE'){last=Date.now();process.stderr.write(`${phase}${value.path?' · '+value.path:''}${value.bytes!==undefined?' · '+value.bytes+' / '+(value.totalBytes??'?')+' bytes':''}${value.uploadId?' · '+value.uploadId:''}\n`);}};
-      let scan;
+      if(options.key!==undefined&&!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(options.key))fail('--key must be a UUID');
+      let scan,sourceDownload,campusSource;
       try{
         if(mode==='git')scan=await gitSnapshot(positionals[2],options.ref||'HEAD',progress);
         else if(mode==='code'){projectSlug(options.project);if(!options.release)fail('Code sync requires --release FULL_HASH');scan=await remoteSnapshot(call,'projects',{machine:source,project:options.project,release:options.release},progress);}
-        else{const [dataset,version,...extra]=positionals[2].split('@');if(extra.length||!dataset||!/^[a-f0-9]{64}$/.test(version||''))fail('Data sync requires NAME@FULL_VERSION_HASH');if(!/^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/.test(options.name||''))fail('Select the target private dataset name using --name NAME (1–40 ASCII characters)');scan=await remoteSnapshot(call,'datasets',{machine:source,dataset,version},progress);scan.expectedVersion=version;}
+        else{
+          const [dataset,version,...extra]=positionals[2].split('@');
+          if(extra.length||!dataset||!/^[a-f0-9]{64}$/.test(version||''))fail('Data sync requires NAME@FULL_VERSION_HASH');
+          if(!/^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/.test(options.name||''))fail('Select the target private dataset name using --name NAME (1–40 ASCII characters)');
+          const reference={machine:source,dataset,version};
+          if(options['dry-run'])scan=(await call('datasets.snapshot.info',reference)).result;
+          else{
+            const sourceKey=snapshotKey([userId,'sync-data-source',source,dataset,version,target,options.name,options.key||'default']);
+            sourceDownload=(await call('transfers.create',{kind:'download',key:sourceKey,...reference})).result;
+            if(!sourceDownload||!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(sourceDownload.id||'')
+              ||!['WAITING_CLIENT','SUCCEEDED'].includes(sourceDownload.state)||sourceDownload.cancelRequested||!sourceDownload.snapshot)
+              fail('Sync source unconfirmed; inspect original download '+(sourceDownload?.id||sourceKey)+'. No source lease or target upload was replaced');
+            progress('HANDLE',{uploadId:sourceDownload.id});
+            if(sourceDownload.state==='SUCCEEDED')scan=sourceDownload.snapshot;
+            else{
+              campusSource=snapshotFactory(call,{machine:source,downloadId:sourceDownload.id,manifestSha256:sourceDownload.snapshot.manifestSha256});
+              scan=await remoteSnapshot((operation,args)=>campusSource.call(operation,args),'datasets',reference,progress);
+              if(scan.manifestSha256!==sourceDownload.snapshot.manifestSha256)fail('Original sync source manifest changed');
+            }
+          }
+          if(scan.state!=='READY'||!/^[a-f0-9]{64}$/.test(scan.manifestSha256||'')||!Number.isSafeInteger(scan.manifestBytes)||scan.manifestBytes<1||scan.manifestBytes>64*DATA_CHUNK
+            ||!Number.isSafeInteger(scan.totalBytes)||scan.totalBytes<0||!Number.isSafeInteger(scan.entries)||scan.entries<0)fail('Source did not confirm fixed sync metadata');
+          scan.expectedVersion=version;
+        }
         const key=options.key||snapshotKey([session.principal.userId,mode,target,project||options.name,scan.manifestSha256]);if(!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(key))fail('--key must be a UUID');
         let resume=null;
         if(project){const catalog=(await call('projects.list',{machine:target})).result;if(catalog.projects.some(p=>p.project===project)){resume=(await call('projects.sync.status',{machine:target,project,key})).result;if(resume.manifestSha256!==scan.manifestSha256)fail('Existing destination does not belong to this fixed snapshot');}}
@@ -155,8 +180,23 @@ export async function runManualSync(call,{options,positionals,training,machines,
         process.stderr.write(`Sync plan: ${mode} · ${source||'local Git'} → ${target} · ${scan.totalBytes} bytes · ${scan.entries} entries\nFixed source: ${scan.source?.commit||scan.source?.release||positionals[2]}\nSync key: ${key}\n`);
         if(options['dry-run'])result={...plan,state:'PREVIEW',changes:false};
         else if(project)result=await syncCodeSnapshot(call,{machine:target,project,key,scan,progress});
-        else{const keyStore={get:()=>key,set:async()=>{fail('This upload was explicitly discarded; rerun with a new --key after review');}};result=await uploadDatasetSnapshot(call,{machine:target,name:options.name,userId:session.principal.userId,scan,progress,keyStore});if(result.version!==scan.expectedVersion)fail('Target READY dataset content version differs from the source');}
-      }finally{await scan?.cleanup();}
+        else{
+          if(sourceDownload.state==='SUCCEEDED'){
+            result=(await call('datasets.upload.status',{machine:target,uploadId:key})).result;
+            if(result?.state!=='READY'||result.uploadId!==key||result.manifestBytes!==scan.manifestBytes||result.totalBytes!==scan.totalBytes
+              ||result.entries!==scan.entries||result.name!==options.name||result.remainingBytes!==0)fail('Original completed sync target is unconfirmed; no UUID or source hold was replaced');
+          }else{
+            const keyStore={get:()=>key,set:async()=>{fail('This upload was explicitly discarded; rerun with a new --key after review');}};
+            result=await uploadDatasetSnapshot(call,{machine:target,name:options.name,userId:session.principal.userId,scan,progress,keyStore});
+          }
+          if(result.version!==scan.expectedVersion)fail('Target READY dataset content version differs from the source');
+          if(sourceDownload.state!=='SUCCEEDED'){
+            const complete=(await call('transfers.progress',{id:sourceDownload.id,bytes:scan.totalBytes,complete:true})).result;
+            if(complete?.id!==sourceDownload.id||complete.state!=='SUCCEEDED')fail('Source release is unconfirmed; inspect original download '+sourceDownload.id);
+          }
+          result={...result,machine:target,sourceDownloadId:sourceDownload.id};
+        }
+      }finally{try{await scan?.cleanup?.();}finally{await campusSource?.close();}}
 
   return result;
 }

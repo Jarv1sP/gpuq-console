@@ -12,7 +12,7 @@ const fail=(message,status=400)=>{throw Object.assign(Error(message),{status});}
 // This row is not part of account snapshots, so an unrelated rollback cannot
 // remove a maintenance decision. No deadline or automatic unlock exists.
 const READ_OR_STOP=new Set([
-  'storage.usage.mine','storage.usage.users','storage.upload.locate',
+  'storage.usage.mine','storage.usage.users',
   'jobs.logs','jobs.watch','jobs.diagnostics','jobs.completion','jobs.reconcile-resources','jobs.cancel','logs','watch','diagnostics','cancel','tasks.display.get',
   'files.list','files.get','files.upload.status','files.upload.list','files.upload.cancel','projects.list','projects.quota','projects.status','projects.verify','projects.local-import.status','projects.local-import.cancel','host.status',
   'datasets.list','datasets.catalog','datasets.capacity','datasets.overview','datasets.files.list','datasets.training.capabilities','datasets.status',
@@ -22,7 +22,7 @@ const READ_OR_STOP=new Set([
   'projects.label.get','projects.group.get','projects.catalog','projects.retire.plan','projects.retire.status',
   'projects.sync.status','projects.sync.cancel',
   'datasets.delete.status','datasets.delete.cancel','storage.dataset-delete.cancel','storage.dataset-delete.status','storage.dataset-delete.capabilities','storage.dataset-delete.locations',
-  'datasets.workspace.list','datasets.workspace.get','datasets.workspace.status','datasets.upload.status','datasets.upload.list','datasets.upload.admission.status',
+  'datasets.workspace.list','datasets.workspace.get','datasets.workspace.status','datasets.upload.status','datasets.upload.list','datasets.upload.admission.status','storage.upload.locate',
   'datasets.upload.routes','datasets.upload.pause','datasets.upload.direct-revoke','datasets.import.list','datasets.import.status','datasets.import.cancel',
   'datasets.storage.status','datasets.storage.plan','terminal.close','terminal.detach','terminal.status',
   'transfers.list','transfers.status','transfers.capabilities','transfers.cancel','transfers.progress',
@@ -135,6 +135,11 @@ export function installMaintenance(service){
     if(args.jobId){const job=service.store.jobs.find(job=>job.id===args.jobId&&(admin||job.userId===principal?.userId));if(job)machines.push(job.machine);}
     const value=maintenanceState(service);
     if(value.global)throw maintenanceError(null,value.global);
+    // A source-bound negative plan only inspects local absence and records its
+    // proof; it cannot fence/isolate data. The node rejects this shape if a
+    // registration or residual data exists. Dependency plans stay blocked.
+    if(operation==='storage.dataset-delete.plan'&&args.authorization?.complete===true
+      &&Array.isArray(args.references)&&args.references.length===0)return;
     for(const machine of machines)if(value.machines[machine]){
       const visible=admin||actor?.enabled&&(service.store.get(actor.id).limits[machine]||service.archiveMachineVisible?.(actor.id,machine));
       if(principal&&!visible)throw Object.assign(Error('这台机器未授权。'),{status:403,code:'MAINTENANCE_ACTIVE'});
@@ -142,10 +147,10 @@ export function installMaintenance(service){
     }
   };
   const bridge=service.bridge;
-  if(bridge)service.bridge=(machine,operation,args)=>{
+  if(bridge)service.bridge=(machine,operation,args,context)=>{
     const actor=service.store.users.find(user=>user.id===(args.userId||args.job?.userId));
     service.assertMaintenanceAllowed(operation,{...args,machine},actor?{userId:actor.id,role:actor.role||'member'}:null);
-    return bridge(machine,operation,args);
+    return bridge(machine,operation,args,context);
   };
   service.db.exec(`CREATE TABLE IF NOT EXISTS maintenance_requests (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT NOT NULL UNIQUE,owner_id TEXT NOT NULL,client_key TEXT NOT NULL,

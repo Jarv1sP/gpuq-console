@@ -4,11 +4,12 @@ import {randomUUID} from 'node:crypto';
 export const communityHelp=`gpuctl community posts [--kind feedback|discussion|announcement]
 gpuctl community show ID
 gpuctl community post --title TITLE --body-file FILE [--kind feedback|discussion|announcement] [--pin] [--key UUID]
-gpuctl community edit ID --revision N [--title TITLE] [--body-file FILE]
+gpuctl community edit ID --revision N [--title TITLE] [--body-file FILE] [--status open|investigating|resolved|closed]
 gpuctl community pin ID on|off --revision N
 gpuctl community comment ID --body TEXT [--key UUID]
 gpuctl community comments ID
 gpuctl community chat [--body TEXT] [--key UUID]
+--status edits feedback posts only and requires an administrator.
 Use --json for scripting. Uncertain submission: reuse the same --key and content within 30 days.`;
 const common=['url','session-file','json','machines','datasets'];
 const fail=message=>{throw Error(message);};
@@ -30,7 +31,7 @@ export async function runCommunityCommand({positionals,options={},training=[],ca
   if(positionals[0]!=='community'||training.length)fail(communityHelp);
   if(options.machines?.length||options.datasets?.length)fail('Community commands do not take a machine or dataset.');
   const command=positionals[1]||'posts',tail=positionals.slice(2);
-  const spec={posts:{n:0,opts:['kind','status','cursor','limit']},show:{n:1,opts:[]},post:{n:0,opts:['kind','title','body','body-file','pin','key','announcement-type']},edit:{n:1,opts:['revision','title','body','body-file']},pin:{n:2,opts:['revision']},comment:{n:1,opts:['body','body-file','key']},comments:{n:1,opts:['cursor','limit']},chat:{n:0,opts:['body','body-file','key','cursor','limit']}}[command];
+  const spec={posts:{n:0,opts:['kind','status','cursor','limit']},show:{n:1,opts:[]},post:{n:0,opts:['kind','title','body','body-file','pin','key','announcement-type']},edit:{n:1,opts:['revision','title','body','body-file','status']},pin:{n:2,opts:['revision']},comment:{n:1,opts:['body','body-file','key']},comments:{n:1,opts:['cursor','limit']},chat:{n:0,opts:['body','body-file','key','cursor','limit']}}[command];
   if(!spec||tail.length!==spec.n||Object.keys(options).some(k=>![...common,...spec.opts].includes(k)))fail(communityHelp);
   const request=async(op,args)=>(await call('community.'+op,args)).result;
   const paging=()=>({...((options.limit!==undefined)?{limit:integer(options.limit,'--limit',command==='posts'?50:100)}:{}),...(options.cursor?{cursor:options.cursor}:{})});
@@ -51,8 +52,9 @@ export async function runCommunityCommand({positionals,options={},training=[],ca
     return create('posts.create',{kind,title,body:text,...(kind==='announcement'?{announcementType:options['announcement-type']||'notice',...(options.pin?{pinned:true}:{})}:{})});
   }
   if(command==='edit'){
-    if(options.title===undefined&&options.body===undefined&&options['body-file']===undefined)fail('Nothing to edit. Use --title or --body-file.');
-    return request('posts.update',{id:postId(),revision:integer(options.revision,'--revision'),...(options.title===undefined?{}:{title:content(options.title,120,'Title')}),...(options.body===undefined&&options['body-file']===undefined?{}:{body:await body(options,8000)})});
+    if(options.title===undefined&&options.body===undefined&&options['body-file']===undefined&&options.status===undefined)fail('Nothing to edit. Use --title, --body-file or --status.');
+    if(options.status!==undefined&&!['open','investigating','resolved','closed'].includes(options.status))fail('Use --status open|investigating|resolved|closed for feedback posts.');
+    return request('posts.update',{id:postId(),revision:integer(options.revision,'--revision'),...(options.title===undefined?{}:{title:content(options.title,120,'Title')}),...(options.body===undefined&&options['body-file']===undefined?{}:{body:await body(options,8000)}),...(options.status===undefined?{}:{status:options.status})});
   }
   if(command==='pin'){if(!['on','off'].includes(tail[1]))fail('Use community pin ID on|off --revision N.');return request('posts.update',{id:postId(),revision:integer(options.revision,'--revision'),pinned:tail[1]==='on'});}
   if(command==='comment')return create('comments.create',{postId:postId(),body:await body(options,4000)});

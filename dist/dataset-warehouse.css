@@ -229,9 +229,13 @@ body[data-room=datasets] .v3-partial{font:12px var(--sans);align-self:center}
 #page-datasets :is(.v4-training-bar,.v4-training-values,.v4-training-key) .v4-data{background:var(--ink)}
 #page-datasets :is(.v4-training-bar,.v4-training-key) .v4-other,
 #page-datasets .v4-training-bar.unknown{background:repeating-linear-gradient(135deg,var(--ink-3) 0 2px,transparent 2px 4px)}
+#page-datasets .v4-training-bar .v4-other-small{background:var(--ink-3)}
 #page-datasets .v4-training-bar .v4-budget{position:absolute;top:-4px;width:1.5px;height:16px;background:var(--ink-2)}
 #page-datasets .v4-training-values{display:flex;align-items:center;flex-wrap:wrap;gap:8px 14px;font-size:12px;color:var(--ink-2);min-width:0}
 #page-datasets .v4-training-values>span{display:inline-flex;align-items:center;gap:5px;min-width:0}
+#page-datasets .storage-observed-age{font:11px var(--sans);color:var(--muted);white-space:nowrap}
+#page-datasets .v4-project-value:has(.storage-partial-reason){flex-wrap:wrap;max-width:100%}
+#page-datasets .storage-partial-reason{font:11px var(--sans);color:var(--muted);white-space:nowrap}
 #page-datasets .v4-training-values i,#page-datasets .v4-training-key i{display:inline-block;width:7px;height:7px;border-radius:2px;flex:none}
 #page-datasets :is(.v4-training-card,.v4-warehouse-card).v4-maintenance-card{min-height:98px;align-content:center;gap:12px}
 #page-datasets .v4-maintenance-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:500 13px var(--mono)}
@@ -325,3 +329,5 @@ body[data-room=datasets] .v3-partial{font:12px var(--sans);align-self:center}
 .storage-mine-status,.storage-mine-empty{margin:0;color:var(--ink-2)}
 .storage-release-sheet{width:min(620px,100vw)}
 @media(max-width:759px){.storage-view-tabs button{height:48px}.storage-mine-machine>header{padding:14px 12px;gap:8px}.storage-mine-bar{margin-inline:12px}.storage-mine-row{padding:8px 12px;gap:8px}.storage-mine-name{display:block}.storage-mine-name b{display:block}.storage-mine-name small{display:block;overflow:hidden;text-overflow:ellipsis}.storage-mine-action .button{height:44px}}
+
+#page-datasets .storage-reading-age{font-size:11px;line-height:1.4;color:var(--ink-3);text-align:right}

@@ -1,3 +1,4 @@
+import {validateUploadRoutes} from './dist/upload-routes.js';
 import {createHash,randomUUID} from 'node:crypto';
 import {readFile} from 'node:fs/promises';
 import {MACHINES} from './dist/model.js';
@@ -97,10 +98,14 @@ export function installDatasetIngress(service,input){
   };
   const save=row=>service.db.prepare('INSERT INTO dataset_upload_placements(owner,upload_id,data) VALUES(?,?,?) ON CONFLICT(owner,upload_id) DO UPDATE SET data=excluded.data')
     .run(row.owner,row.uploadId,JSON.stringify(row));
-  const lanes=new Map();let pending=0;
+  const lanes=new Map(),readLanes=new Map();let pending=0;
+  // UUID writes still exclude other writes. Observations have separate, bounded
+  // slots and never extend a write lane merely because a client stopped waiting.
+  service.datasetUploadLaneStats=()=>({writes:pending,reads:readLanes.size,queued:0});
   const fence=(principal,row,operation='datasets.upload.begin')=>{
     const user=service.store.get(principal.userId);
-    if(service.closing||!user?.enabled||user.username!==principal.username||(user.role||'member')!==principal.role||!user.limits?.[row.requestedMachine])
+    if(service.closing||!user?.enabled||user.username!==principal.username||
+      (user.role||'member')!==principal.role||!user.limits?.[row.requestedMachine])
       fail('账号或所选训练服务器的授权已改变。',403);
     const maintenanceArgs={key:operation==='datasets.upload.admission.create'?row.admissionKey:row.uploadId,uploadId:row.uploadId};
     service.assertMaintenanceAllowed?.(operation,{...maintenanceArgs,machine:row.requestedMachine},principal);
@@ -108,14 +113,25 @@ export function installDatasetIngress(service,input){
       service.assertMaintenanceAllowed?.(operation,{...maintenanceArgs,machine:row.storageMachine},principal);
     return hash(user);
   };
-  const call=async(principal,row,machine,operation,args,publicOperation=operation)=>{
-    const snapshot=fence(principal,row,publicOperation);
-    const result=await service.bridge(machine,operation,args);
+  const call=async(principal,row,machine,operation,args,publicOperation=operation,readContext)=>{
+    readContext?.check?.();readContext?.signal?.throwIfAborted();
+    const snapshot=fence(principal,row,publicOperation),started=performance.now();
+    let result;
+    try{result=await service.bridge(machine,operation,args,readContext);}
+    finally{if(readContext?.timings){readContext.timings.rpcCount++;readContext.timings.rpcMs+=performance.now()-started;}}
+    readContext?.check?.();readContext?.signal?.throwIfAborted();
     if(fence(principal,row,publicOperation)!==snapshot)fail('上传期间账号授权已改变。',403);
+    if(operation==='datasets.upload.direct-ticket'&&result?.available===true&&result.routeId==='primary'){
+      const descriptor=await service.bridge(machine,'datasets.upload.routes',{userId:row.owner,hostAdmin:false});
+      if(fence(principal,row,publicOperation)!==snapshot)fail('上传期间账号授权已改变。',403);
+      const routes=validateUploadRoutes(descriptor,machine);
+      if(descriptor.revision!==result.revision||descriptor.certificateSha256!==result.certificateSha256||routes[0].endpoint!==result.endpoint)fail('上传票据与原节点路线不匹配。',502);
+      return {...result,routes:routes.filter(r=>r.id==='primary'||r.id==='node-lan').map(({id,kind,endpoint})=>({id,kind,endpoint}))};
+    }
     return result;
   };
-  const locate=async(principal,row,machine,publicOperation)=>{
-    const result=await call(principal,row,machine,'storage.upload.locate',{userId:row.owner,uploadId:row.uploadId},publicOperation);
+  const locate=async(principal,row,machine,publicOperation,readContext)=>{
+    const result=await call(principal,row,machine,'storage.upload.locate',{userId:row.owner,uploadId:row.uploadId},publicOperation,readContext);
     if(!result||result.protocol!=='dataset-upload-location-v1'||result.machine!==machine||result.userId!==row.owner||
       result.uploadId!==row.uploadId||typeof result.present!=='boolean'||
       result.present&&!validSpecification(result.specification))fail('旧上传位置未能确认；未创建其他副本。',502);
@@ -123,15 +139,15 @@ export function installDatasetIngress(service,input){
   };
   const placement=row=>({placementProtocol:1,requestedMachine:row.requestedMachine,storageMachine:row.storageMachine,
     storageTier:row.warehouse?'hdd':'existing',legacyPlacement:!row.warehouse});
-  const remember=(row,result)=>{
+  const remember=(row,result,persist=save)=>{
     if(result?.state==='READY'){
       const expected='u-'+createHash('sha256').update(row.owner).digest('hex').slice(0,16)+'-'+row.specification.name;
       if(result.uploadId!==row.uploadId||result.dataset!==expected||!HASH.test(result.version||'')||
         result.totalBytes!==row.specification.totalBytes||result.entries!==row.specification.entries)
         fail('仓库发布回执与上传身份不匹配。',502);
-      row.ready={dataset:result.dataset,version:result.version};save(row);
+      row.ready={dataset:result.dataset,version:result.version};persist(row);
     }else if(['DISCARDING','DISCARDED','FAILED'].includes(result?.state)&&row.ready){
-      delete row.ready;save(row);
+      delete row.ready;persist(row);
     }
     return {...result,...placement(row)};
   };
@@ -307,7 +323,7 @@ export function installDatasetIngress(service,input){
     }finally{if(write){lanes.delete(lane);pending--;}}
   };
 
-  service.datasetUploadIngress=async(principal,action,args)=>{
+  service.datasetUploadIngress=async(principal,action,args,readContext)=>{
     if(action==='admission.create'||action==='admission.status')return admission(principal,action,args);
     const owner=principal.userId,id=action==='begin'?args.key:args.uploadId;
     // Preflight has no upload identity yet and therefore cannot resume or
@@ -315,20 +331,46 @@ export function installDatasetIngress(service,input){
     if(action==='routes'&&id===undefined){
       const target=policy.enabled?policy.machine:args.machine;
       const row={owner,requestedMachine:args.machine,storageMachine:target};
-      const value=await call(principal,row,target,'datasets.upload.routes',{userId:owner,hostAdmin:false});
+      const value=await call(principal,row,target,'datasets.upload.routes',{userId:owner,hostAdmin:false},'datasets.upload.routes',readContext);
       service.datasetArchiveCapability=policy.enabled?archiveUploadCapability(value?.archive):null;
       return {...value,requestedMachine:args.machine,storageMachine:target,storageTier:policy.enabled?'hdd':'existing',
         ...(policy.enabled?{placementProtocol:1,legacyPlacement:false}:{})};
     }
     if(!USER.test(owner)||!UUID.test(id||''))fail('无效的上传身份。',400);
     const lane=owner+'/'+id;
+    const readOnly=action==='routes'||action==='status',readKey=lane+'/'+action+'/'+(args.path||'');
     if(lanes.has(lane))fail('该上传已有操作正在执行，请稍后重试。',429);
-    if(pending>=8)fail('上传控制繁忙，请稍后重试。',429);
-    lanes.set(lane,true);pending++;
+    if(readOnly&&(readLanes.has(readKey)||readLanes.size>=4)||!readOnly&&pending>=8)
+      fail('上传控制繁忙，请稍后重试。',429);
+    const observation={lane,invalidated:false};
+    if(readOnly)readLanes.set(readKey,observation);
+    else{
+      // A new write invalidates outstanding observations, including BOUND begin
+      // attempts whose durable row may already have the same phase and hash.
+      for(const active of readLanes.values())if(active.lane===lane)active.invalidated=true;
+      lanes.set(lane,true);pending++;
+    }
+    let journalSnapshot,loaded=false;
+    const readLoad=()=>{const started=performance.now();try{return load(owner,id);}finally{if(readContext?.timings)readContext.timings.dbMs+=performance.now()-started;}};
+    const outerCheck=readContext?.check;
+    const checkObservation=()=>{
+      outerCheck?.();readContext?.signal?.throwIfAborted();
+      if(readOnly&&(observation.invalidated||loaded&&hash(readLoad())!==journalSnapshot))
+        fail('上传记录已有操作更新；请用原编号重新查询。',429);
+    };
+    if(readOnly)readContext={...readContext,check:checkObservation};
+    const persist=row=>{
+      if(readOnly)checkObservation();
+      save(row);
+      if(readOnly)journalSnapshot=hash(row);
+    };
     try{
-      let row=load(owner,id);
-      if(!row&&!policy.enabled)return service.bridge(args.machine,'datasets.upload.'+action,
-        {...Object.fromEntries(Object.entries(args).filter(([key])=>key!=='machine'&&(action!=='routes'||key!=='uploadId'))),userId:owner,hostAdmin:false});
+      let row=readLoad();journalSnapshot=hash(row);loaded=true;
+      if(!row&&!policy.enabled){
+        const result=await service.bridge(args.machine,'datasets.upload.'+action,
+          {...Object.fromEntries(Object.entries(args).filter(([key])=>key!=='machine'&&(action!=='routes'||key!=='uploadId'))),userId:owner,hostAdmin:false},readContext);
+        checkObservation();return result;
+      }
       if(row&&row.requestedMachine!==args.machine)fail('此上传已绑定原先选择的服务器；请使用原服务器继续。');
       if(row?.specification?.archive&&['manifest','chunk'].includes(action))throw Object.assign(Error('压缩包只走校内直连。'),{status:403,code:'CAMPUS_ROUTE_UNAVAILABLE'});
       if(action==='begin'&&row?.specificationSha256&&row.specificationSha256!==hash(specification(args)))
@@ -352,7 +394,7 @@ export function installDatasetIngress(service,input){
         if(action==='status'){
           const journalSnapshot=hash(row),policySnapshot=hash([service.datasetIngressPolicy,service.storageArchivePolicy]);
           if(row.phase==='ISSUED')currentPolicy(row);
-          const located=await locate(principal,row,row.storageMachine,'datasets.upload.status');
+          const located=await locate(principal,row,row.storageMachine,'datasets.upload.status',readContext);
           if(located.uploadAdmissionProtocol!==1||located.initializationProtocol!==1||
             located.nodePresent!==located.present)fail('仓库上传初始化状态未获权威确认；未改换编号或位置。',502);
           if(!located.present){
@@ -382,12 +424,12 @@ export function installDatasetIngress(service,input){
             fail('仓库已初始化回执与固定上传准入不匹配；未改换编号或位置。',502);
           const {machine,...request}=args;
           const result=await call(principal,row,row.storageMachine,'datasets.upload.status',
-            {...request,userId:owner,hostAdmin:false});
+            {...request,userId:owner,hostAdmin:false},'datasets.upload.status',readContext);
           if(!result||result.uploadId!==row.uploadId||!UPLOAD_STATES.has(result.state)||
             ['name','manifestBytes','totalBytes','entries'].some(key=>result[key]!==row.specification[key]))
             fail('仓库上传状态与固定上传准入不匹配；未改换编号或位置。',502);
           return remember(row,{...result,initializationProtocol:1,nodePresent:true,userId:owner,
-            admissionProtocol:1,admissionKey:row.admissionKey});
+            admissionProtocol:1,admissionKey:row.admissionKey},persist);
         }
         if(row.phase==='ISSUED'){
           if(action!=='begin')fail('此上传尚未向仓库准入；请按原意图核对并继续。');
@@ -416,7 +458,7 @@ export function installDatasetIngress(service,input){
       if(row.phase==='LOCATING'){
         // Exact owner/key observations only. Errors are never interpreted as
         // absence. Probe all configured nodes to prevent duplicate old keys.
-        const found=await Promise.all(MACHINES.map(async machine=>({machine:machine.id,...await locate(principal,row,machine.id,'datasets.upload.'+action)})));
+        const found=await Promise.all(MACHINES.map(async machine=>({machine:machine.id,...await locate(principal,row,machine.id,'datasets.upload.'+action,readContext)})));
         const existing=found.filter(value=>value.present);
         if(existing.length>1)fail('同一上传编号存在于多台服务器；请联系管理员确认，未写入数据。');
         if(existing.length===1){
@@ -434,13 +476,13 @@ export function installDatasetIngress(service,input){
           // Preserve this LOCATING journal: never silently rekey or relabel it.
           fail('原上传编号在所有节点均不存在；请升级 gpuctl 并使用数据仓库的新上传入口。',409);
         }
-        row.phase='BOUND';save(row);
+        row.phase='BOUND';persist(row);
       }
       const {machine,uploadId,...request}=args;
       const payload={...request,...(action!=='begin'&&action!=='routes'?{uploadId}:{}),userId:owner,hostAdmin:false};
-      const result=await call(principal,row,row.storageMachine,'datasets.upload.'+action,payload);
-      return remember(row,result);
-    }finally{lanes.delete(lane);pending--;}
+      const result=await call(principal,row,row.storageMachine,'datasets.upload.'+action,payload,'datasets.upload.'+action,readContext);
+      return remember(row,result,persist);
+    }finally{if(readOnly)readLanes.delete(readKey);else{lanes.delete(lane);pending--;}}
   };
   return {policy,load};
 }

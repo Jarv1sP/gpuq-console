@@ -1,6 +1,6 @@
 // Data only: consume the portal's permission-filtered catalog. Do not guess
 // ownership, a latest version, cache release, capacity or training admission.
-import {databaseSummary} from './dataset-flow.js';
+import {databaseSummary,projectLowerBoundFacts} from './dataset-flow.js';
 import {defaultDatasetDisplayName} from './dataset-display-name.js';
 export function datasetOwnerName(label){
   if(typeof label!=='string')return '未知';
@@ -58,16 +58,18 @@ export function createStorageDisplayHistory({now=Date.now}={}){
     project(kind,key,current,fields){
       const row=entry(kind,key),value=copy(current??row.meta),used=[];let stale=false;
       for(const path of fields){
-        const record=row.fields.get(path),recent=record&&now()-record.at<STORAGE_READING_MAX_AGE_MS;
+        const record=row.fields.get(path),recent=record&&(now()-record.at<STORAGE_READING_MAX_AGE_MS||['warehouse','training','catalog-list'].includes(kind));
         put(value,path,recent?record.value:!record&&!row.failed?number(get(current,path)):null);
-        if(recent){used.push(record);stale ||= row.failed||record.failed;
-          if(path.startsWith('volume.'))value.volume.collectedAt=record.context.volume?.collectedAt??record.collectedAt;
-          if(path==='readyContentBytes')value.usageComplete=record.context.usageComplete;
+        if(recent){used.push(record);stale ||= row.failed||record.failed||now()-record.at>=STORAGE_READING_MAX_AGE_MS;
+          if(path.startsWith('volume.')){value.volume.collectedAt=record.context.volume?.collectedAt??record.collectedAt;value.volume.timestamp=record.context.volume?.timestamp??null;}
+          if(['totalBytes','usedBytes','availableBytes'].includes(path))value.timestamp=record.context.timestamp??null;
+          if(['contentBytes','datasetCount','readyContentBytes','readyVersionCount'].includes(path))value.catalogCollectedAt=record.collectedAt;
+          if(['contentBytes','readyContentBytes'].includes(path))value.usageComplete=record.context.usageComplete;
         }
       }
       const times=used.map(row=>row.collectedAt).filter(value=>typeof value==='string'&&Number.isFinite(Date.parse(value)));
       value.collectedAt=times.length?times.reduce((a,b)=>Date.parse(a)<Date.parse(b)?a:b):null;
-      value.stale=stale;value.loading=!row.completed&&!used.length&&row.pending&&fields.every(path=>number(get(value,path))===null);return value;
+      value.stale=stale||current?.stale===true;value.loading=!used.length&&(row.pending||['warehouse','training','catalog-list'].includes(kind)&&row.failed)&&fields.every(path=>number(get(value,path))===null);return value;
     },
     loading(kind){const row=entry(kind,'@status');return row.pending&&!row.completed;},
     nextExpiry(){const deadlines=[...kinds.values()].flatMap(rows=>[...rows.values()].flatMap(row=>[...row.fields.values()].map(value=>value.at+STORAGE_READING_MAX_AGE_MS))).filter(time=>time>now());return deadlines.length?Math.min(...deadlines)-now():null;}
@@ -80,7 +82,7 @@ export function storageDisplayHistory(store){
 }
 export const WAREHOUSE_READING_FIELDS=['totalBytes','usedBytes','availableBytes','reserveBytes','contentBytes','datasetCount'];
 export const TRAINING_READING_FIELDS=['volume.totalBytes','volume.usedBytes','volume.availableBytes','volume.reserveBytes','volume.usableBytes','readyContentBytes','readyVersionCount','budgetBytes'];
-export const STORAGE_OVERVIEW_TIMEOUT_MS=8000;
+export const STORAGE_OVERVIEW_TIMEOUT_MS=20000;
 export async function readStorageOverview(store,{signal}={}){
   const controller=new AbortController(),abort=()=>controller.abort(signal?.reason);
   if(signal?.aborted)abort();else signal?.addEventListener('abort',abort,{once:true});
@@ -98,8 +100,9 @@ const knownNumber=(rows,key)=>{
 
 function warehouse(version,locations){
   const result=databaseSummary({version,locations});
-  return {state:result.kind==='none'?'unrecorded':result.kind,phase:result.phase,
-    machine:result.machine,originalConfirmed:result.saved,
+  const confirmed=locations.some(row=>row.warehouseReady===true);
+  return {state:result.saved&&!confirmed?'unknown':result.kind==='none'?'unrecorded':result.kind,phase:result.phase,
+    machine:result.machine,originalConfirmed:confirmed,
     locations:locations.filter(row=>row.warehouseReady===true).map(row=>({machine:row.machine,confirmed:true,state:'READY'})),
     records:locations.filter(row=>row.storage&&typeof row.storage==='object')
       .map(row=>({machine:row.machine,dataset:text(row.dataset),storage:copy(row.storage)}))};
@@ -158,7 +161,7 @@ export function aggregateDatasetCatalog(catalog){
   }
   return {machine:catalog.machine??null,partial:catalog.partial===true||[...machines.values()].some(value=>value!=='ok'),
     // Preserve a supplied timestamp; never manufacture freshness on refresh.
-    checkedAt:copy(catalog.checkedAt),machines:[...machines].map(([machine,state])=>({machine,state})),
+    checkedAt:copy(catalog.checkedAt),loading:catalog.loading===true,stale:catalog.stale===true,machines:[...machines].map(([machine,state])=>({machine,state})),
     datasets:[...datasets].map(([dataset,group])=>{
       const names=group.items.map(row=>row.labelScope==='personal'?text(row.name):null);
       const revisions=group.items.map(row=>number(row.displayNameRevision));
@@ -201,13 +204,20 @@ export function hasReadableLocalOriginal(version,machine){
 export function adaptStorageOverview(raw){
   if(raw?.protocol!=='dataset-storage-overview-v1'||!Array.isArray(raw.warehouse?.volumes)||
     !Array.isArray(raw.caches)||!Array.isArray(raw.datasets))return null;
-  const volume=value=>({id:text(value?.id),state:text(value?.state),checkedAt:copy(value?.checkedAt),collectedAt:copy(value?.collectedAt),
+  const unconfirmed=new Map();
+  for(const item of raw.datasets)for(const version of list(item.versions))for(const cache of list(version.caches)){
+    if(state(cache.state)!=='UNKNOWN')continue;
+    let versions=unconfirmed.get(cache.machine);
+    if(!versions){versions=new Set();unconfirmed.set(cache.machine,versions);}
+    versions.add(JSON.stringify([cache.dataset||item.dataset,version.version]));
+  }
+  const volume=value=>({id:text(value?.id),state:text(value?.state),checkedAt:copy(value?.checkedAt),collectedAt:copy(value?.collectedAt),timestamp:value?.timestamp==='rpc'?'rpc':null,
     ...Object.fromEntries(['totalBytes','usedBytes','availableBytes','reserveBytes','usableBytes'].map(key=>[key,number(value?.[key])])),
     readOnly:value?.readOnly===true,guarded:value?.guarded===true});
   const volumes=new Map();let unidentified=false;
   for(const row of raw.warehouse.volumes){
     if(!identifier.test(row?.machine||'')||!text(row?.volume?.id)){unidentified=true;continue;}
-    const value={machine:row.machine,volume:volume(row.volume),contentBytes:number(row.originalContentBytes),datasetCount:number(row.datasetCount),warnings:list(row.warnings)},key=JSON.stringify([value.machine,value.volume.id]);
+    const value={machine:row.machine,volume:volume(row.volume),contentBytes:number(row.originalContentBytes),datasetCount:number(row.datasetCount),usageComplete:row.usageComplete===true,loading:row.loading===true,stale:row.stale===true,catalogCollectedAt:copy(row.collectedAt),warnings:list(row.warnings)},key=JSON.stringify([value.machine,value.volume.id]);
     if(volumes.has(key)&&JSON.stringify(volumes.get(key))!==JSON.stringify(value)){
       const previous=volumes.get(key);previous.contentBytes=null;previous.datasetCount=null;
       for(const field of ['totalBytes','usedBytes','availableBytes','reserveBytes','usableBytes'])previous.volume[field]=null;
@@ -222,11 +232,14 @@ export function adaptStorageOverview(raw){
   };
   const totalBytes=sum('totalBytes'),usedBytes=sum('usedBytes'),availableBytes=sum('availableBytes'),contentBytes=sum('contentBytes'),reserveBytes=sum('reserveBytes');
   const known=totalBytes!==null&&totalBytes>0&&usedBytes!==null&&usedBytes<=totalBytes&&availableBytes!==null&&usedBytes+availableBytes<=totalBytes&&contentBytes!==null;
-  const caches=raw.caches.filter(row=>identifier.test(row?.machine||'')).map(row=>({machine:row.machine,state:text(row.state),volume:volume(row.volume),
-    readyContentBytes:number(row.readyContentBytes),readyVersionCount:number(row.readyVersionCount),budgetBytes:number(row.budgetBytes),reserveBytes:number(row.reserveBytes),usageComplete:row.usageComplete===true,
+  const caches=raw.caches.filter(row=>identifier.test(row?.machine||'')).map(row=>({machine:row.machine,state:text(row.state),reason:text(row.reason),volume:volume(row.volume),
+    contentLoading:row.loading===true,stale:row.stale===true,catalogCollectedAt:copy(row.catalogCollectedAt),readyContentBytes:number(row.readyContentBytes),readyVersionCount:number(row.readyVersionCount),budgetBytes:number(row.budgetBytes),reserveBytes:number(row.reserveBytes),usageComplete:row.usageComplete===true,
+    usageReason:row.usageComplete===true?null:unconfirmed.get(row.machine)?.size?unconfirmed.get(row.machine).size+' 个缓存版本尚未确认':'缓存目录或大小尚未完整确认',
     projectBytes:number(row.projectBytes),projectUsageComplete:typeof row.projectUsageComplete==='boolean'?row.projectUsageComplete:null,projectCollectedAt:copy(row.projectCollectedAt),
+    projectUsageReason:text(row.projectUsageReason),budgetReason:text(row.budgetReason),warehouseState:text(row.warehouseState),warehouseReason:text(row.warehouseReason),
+    ...projectLowerBoundFacts(row),
     shared:!!text(row.volume?.id)&&volumes.has(JSON.stringify([row.machine,row.volume.id]))}));
-  return {protocol:raw.protocol,checkedAt:copy(raw.checkedAt),partial:raw.partial===true,filePreviewAvailable:raw.filePreviewAvailable===true,
+  return {protocol:raw.protocol,checkedAt:copy(raw.checkedAt),partial:raw.partial===true,loading:raw.loading===true,refreshing:raw.refreshing===true,stale:raw.stale===true,filePreviewAvailable:raw.filePreviewAvailable===true,
     warehouse:{volumes:rows,totalBytes,usedBytes,availableBytes,contentBytes,reserveBytes,known,
       warning:list(raw.warehouse.warnings).concat(rows.flatMap(row=>row.warnings)).some(row=>['WAREHOUSE_USAGE_HIGH','WAREHOUSE_FREE_SPACE_LOW'].includes(row?.code))||availableBytes!==null&&reserveBytes!==null&&availableBytes<=reserveBytes},
     caches,datasets:raw.datasets.filter(item=>identifier.test(item?.dataset||'')).map(item=>({dataset:item.dataset,displayName:text(item.displayName),
@@ -252,25 +265,36 @@ export function displayStorageCapacity(overview,model,capacities=new Map(),machi
     const capacity=capacities.get(machine),total=number(capacity?.filesystemBytes),available=number(capacity?.availableBytes);
     const volume=capacity?.available===true&&total!==null&&available!==null&&available<=total?
       {...emptyVolume(),state:'READY',totalBytes:total,usedBytes:total-available,availableBytes:available,
-        checkedAt:copy(capacity.checkedAt),collectedAt:copy(capacity.collectedAt),
+        checkedAt:copy(capacity.checkedAt),collectedAt:copy(capacity.collectedAt),timestamp:capacity.timestamp==='rpc'?'rpc':null,
         reserveBytes:number(capacity.reserveBytes),usableBytes:number(capacity.usableBytes),guarded:capacity.guarded===true}:emptyVolume();
     const directory=list(model?.machines).find(row=>row.machine===machine)?.state==='ok';
     const ready=versions.filter(v=>v.servers.some(row=>row.machine===machine&&row.observed&&row.state==='READY'));
     const values=ready.map(v=>number(v.bytes)),complete=directory&&model?.capacityUsageComplete!==false&&values.every(value=>value!==null)&&
       !versions.some(v=>v.servers.some(row=>row.machine===machine&&row.state==='UNKNOWN'));
     const subtotal=ready.length&&values.every(value=>value===null)?null:sum(values.filter(value=>value!==null));
+    const facts=capacity?.available===true&&capacity?.storageOverview?.protocol==='dataset-storage-node-v1'?capacity.storageOverview:null;
+    const projectCollectedAt=typeof facts?.cache?.projectCollectedAt==='string'&&Number.isFinite(Date.parse(facts.cache.projectCollectedAt))?facts.cache.projectCollectedAt:null;
+    const projectUsageComplete=facts?.cache?.projectUsageComplete===true&&number(facts.cache.projectBytes)!==null&&projectCollectedAt!==null;
     const fallback={machine,state:volume.state,volume,readyContentBytes:directory?subtotal:null,projectBytes:null,projectUsageComplete:null,projectCollectedAt:null,
-      readyVersionCount:directory?ready.length:null,budgetBytes:null,reserveBytes:volume.reserveBytes,
+      ...projectLowerBoundFacts(facts?.cache),
+      readyVersionCount:directory?ready.length:null,budgetBytes:number(facts?.cache?.budgetBytes),reserveBytes:volume.reserveBytes,
+      budgetReason:text(facts?.cache?.budgetReason),projectUsageReason:text(facts?.cache?.projectUsageReason),
+      warehouseState:facts?.warehouse===null?'NOT_CONFIGURED':facts?.warehouse?.state==='READY'?'READY':'UNKNOWN',warehouseReason:text(facts?.warehouseReason),
       usageComplete:complete,shared:false};
+    if(facts)Object.assign(fallback,{projectBytes:projectUsageComplete?facts.cache.projectBytes:null,projectUsageComplete,projectCollectedAt});
     const actual=overview?.caches.find(row=>row.machine===machine);
     if(!actual)return fallback;
     const result={...actual,volume:{...actual.volume}};
     if(actual.readyContentBytes===null){result.readyContentBytes=fallback.readyContentBytes;result.usageComplete=fallback.usageComplete;}
     else if(actual.usageComplete===false&&fallback.readyContentBytes!==null&&fallback.readyContentBytes>actual.readyContentBytes)result.readyContentBytes=fallback.readyContentBytes;
     if(actual.readyVersionCount===null)result.readyVersionCount=fallback.readyVersionCount;
+    // A failed overview read cannot discard a newer successful public node read.
+    if(actual.state==='UNKNOWN'&&facts){
+      for(const field of ['budgetBytes','budgetReason','projectBytes','projectUsageComplete','projectCollectedAt','projectUsageReason','lowerBoundBytes','permissionDeniedCount','permissionDeniedClasses','warehouseState','warehouseReason'])result[field]=fallback[field];
+    }
     const newer=Number.isFinite(Date.parse(volume.collectedAt))&&Date.parse(volume.collectedAt)>Date.parse(actual.volume.collectedAt);
     for(const field of ['totalBytes','usedBytes','availableBytes','reserveBytes','usableBytes'])if(result.volume[field]===null&&(!actual.volume.collectedAt||newer))result.volume[field]=volume[field];
-    if(newer&&result.volume.totalBytes!==null){result.volume.collectedAt=volume.collectedAt;result.volume.checkedAt=volume.checkedAt;}
+    if(newer&&result.volume.totalBytes!==null){result.volume.collectedAt=volume.collectedAt;result.volume.checkedAt=volume.checkedAt;result.volume.timestamp=volume.timestamp;}
     return result;
   });
   const warehouse=overview?{...overview.warehouse}:{volumes:[],totalBytes:null,usedBytes:null,availableBytes:null,
@@ -285,10 +309,8 @@ export function displayStorageCapacity(overview,model,capacities=new Map(),machi
 // from a named warehouse so an unconfirmed observation stays hollow in UI.
 export function datasetWarehouseMachines(version){
   const w=version?.warehouse;
-  const nodes=list(w?.originals).filter(row=>row.confirmed===true||row.state==='READY').map(row=>row.machine)
-    .concat(list(w?.locations).map(row=>row.machine),list(w?.records).filter(row=>
-      row.storage?.version===version.version&&['ARCHIVED','WAREHOUSE_READY'].includes(row.storage.phase)&&
-      row.storage.originalRetained===true).map(row=>row.storage.archiveMachine),w?.originalConfirmed?[w.machine]:[]);
+  const nodes=list(w?.originals).filter(row=>row.confirmed===true).map(row=>row.machine)
+    .concat(list(w?.locations).filter(row=>row.confirmed===true).map(row=>row.machine),w?.originalConfirmed?[w.machine]:[]);
   return [...new Set(nodes)].filter(machine=>identifier.test(machine||''));
 }
 
@@ -301,6 +323,8 @@ export function adaptUploadTarget(admission){
 export function warehouseStorageCards(overview,model,capacities=new Map(),contentCatalog=model,admission=null){
   const content=new Map(list(contentCatalog?.datasets).flatMap(item=>item.versions.map(version=>
     [JSON.stringify([item.dataset,version.version]),number(version.bytes)])));
+  const unconfirmed=new Set(list(model?.datasets).flatMap(item=>item.versions.flatMap(v=>
+    list(v.warehouse?.records).filter(row=>row.storage?.originalRetained===true&&!datasetWarehouseMachines(v).includes(row.storage.archiveMachine)).map(row=>row.storage.archiveMachine))));
   const groups=new Map(),group=machine=>{
     if(!groups.has(machine))groups.set(machine,{machine,versions:new Map(),datasets:new Set(),volumes:[]});
     return groups.get(machine);
@@ -334,8 +358,10 @@ export function warehouseStorageCards(overview,model,capacities=new Map(),conten
     const contentBytes=actual??fallback;
     const checkedAt=volumes[0]?.volume.checkedAt??raw?.volume?.checkedAt??overview?.checkedAt??model?.checkedAt??null;
     const collectedAt=volumes[0]?.volume.collectedAt??raw?.volume?.collectedAt??null;
-    return {machine:row.machine,uploadTarget:row.machine===uploadTarget,...totals,contentBytes,known:valid&&contentBytes!==null,collectedAt,
-      datasetCount:sum(volumes.map(v=>v.datasetCount))??(model?row.datasets.size:null),checkedAt,
+    return {machine:row.machine,uploadTarget:row.machine===uploadTarget,...totals,contentBytes,known:valid&&contentBytes!==null,collectedAt,timestamp:volumes[0]?.volume.timestamp??raw?.volume?.timestamp??null,
+      datasetCount:sum(volumes.map(v=>v.datasetCount))??(model&&!unconfirmed.has(row.machine)&&model.machines.some(m=>m.machine===row.machine&&m.state==='ok')?row.datasets.size:row.datasets.size||null),checkedAt,
+      usageComplete:volumes.length?volumes.every(v=>v.usageComplete):!unconfirmed.has(row.machine)&&model?.machines.some(m=>m.machine===row.machine&&m.state==='ok')===true,
+      contentLoading:volumes.some(v=>v.loading)||!model,stale:volumes.some(v=>v.stale),catalogCollectedAt:volumes[0]?.catalogCollectedAt??model?.checkedAt??null,
       warning:volumes.some(v=>list(v.warnings).some(w=>['WAREHOUSE_USAGE_HIGH','WAREHOUSE_FREE_SPACE_LOW'].includes(w?.code)))||
         valid&&(totals.usedBytes/totals.totalBytes>=.9||totals.reserveBytes!==null&&totals.availableBytes<=totals.reserveBytes)};
   });

@@ -98,6 +98,8 @@ function publicTask(row){
       phase:step.phase,complete:step.plan?.complete===true,state:step.state,
       ...(step.result?{retainUntil:new Date(step.result.retainUntil*1000).toISOString()}:{}),
       ...(step.error?{error:step.error}:{}),...(step.restoreState?{restoreState:step.restoreState}:{})})),
+    ...(row.skippedMachines?.length?{skippedMachines:row.skippedMachines.map(step=>({machine:step.machine,dataset:step.dataset,
+      reason:'NO_DATASET_COPY',message:'未持有此数据集，已跳过',checkedAt:step.checkedAt}))}:{}),
     events:row.events.map(({time,action,machine:host,state})=>({time,action,...(host?{machine:host}:{}),state}))};
 }
 
@@ -159,20 +161,31 @@ export function installDatasetDeletion(service,{clock=Date.now,pollMs=250,capabi
     }
     service.assertDatasetNotDeleting(host,ref);
   };
-  if(previousBridge)service.bridge=(host,operation,args)=>{
+  if(previousBridge)service.bridge=(host,operation,args,context)=>{
     if(['datasets.prepare','datasets.unregister','datasets.register','datasets.sync.begin','datasets.snapshot.begin'].includes(operation)
       &&service.datasetDeletionBlocked(host,args))
-      return service.confirmDatasetNotDeleting(host,args,args).then(()=>previousBridge(host,operation,args));
+      return service.confirmDatasetNotDeleting(host,args,args).then(()=>previousBridge(host,operation,args,context));
     // Keep the original synchronous maintenance refusal for every untouched
     // operation. A proof read is asynchronous only for a fenced namespace.
-    return previousBridge(host,operation,args);
+    return previousBridge(host,operation,args,context);
   };
   const checkFactory=(principal,assertCurrent,policy,inventory,row,read=false,allowCancellation=false)=>()=>{
     if(service.closing)fail('服务正在关闭；结果未确认。',503);
     assertCurrent();const current=account(service,principal);
     if(!read&&!allowCancellation&&row&&load(row.id)?.cancelRequested)fail('管理员已请求取消删除。',409,'DATASET_DELETE_CANCELED');
     if(JSON.stringify(current)!==policy||sha(MACHINES.map(m=>m.id))!==inventory)fail('账号或服务器清单已改变；删除已暂停。',403);
-    if(!read)for(const host of row?.steps?.map(s=>s.machine)||MACHINES.map(m=>m.id))service.assertMaintenanceAllowed?.(allowCancellation?'datasets.delete.cancel':'datasets.delete',{machine:host},principal);
+    if(!read){
+      const operation=allowCancellation?'datasets.delete.cancel':'datasets.delete';
+      service.assertMaintenanceAllowed?.(operation,{},principal); // Global maintenance still refuses admission.
+      if(!allowCancellation)for(const step of row?.skippedMachines||[]){
+        if(sha(service.maintenanceFor?.(step.machine)||null)!==step.maintenanceDigest)
+          fail('已跳过服务器的维护状态已改变，请管理员核对原删除任务。',409);
+      }
+      // Unknown locations are inspected before applying per-machine write
+      // admission. Each actual bridge write retains its maintenance guard.
+      for(const host of new Set(row?.steps?.filter(s=>s.plan||s.dispatched.length).map(s=>s.machine)||[]))
+        service.assertMaintenanceAllowed?.(operation,{machine:host},principal);
+    }
   };
   const rpc=async(principal,check,host,action,args={})=>{
     check();if(!service.bridge)fail('节点执行桥尚未配置。',503);
@@ -245,7 +258,10 @@ export function installDatasetDeletion(service,{clock=Date.now,pollMs=250,capabi
     try{
       const old=service.db.prepare('SELECT operation_id FROM dataset_deletion_fences WHERE machine=? AND dataset=? AND version=?').get(host,dataset,row.version);
       if(old&&old.operation_id!==row.id)fail('这个版本已有删除任务，请查询原编号。');
-      const step={machine:host,dataset,version:row.version,operationId:randomUUID(),state:'PLANNED',phase:'plan',plan:null,result:null,dispatched:[],fenceAt:null};
+      const skipped=row.skippedMachines?.find(s=>s.machine===host&&s.dataset===dataset);
+      const {maintenanceDigest,checkedAt,...resumed}=skipped||{};
+      const step=skipped?resumed:{machine:host,dataset,version:row.version,operationId:randomUUID(),state:'PLANNED',phase:'plan',plan:null,result:null,dispatched:[],fenceAt:null};
+      if(skipped)row.skippedMachines=row.skippedMachines.filter(s=>s!==skipped);
       row.steps.push(step);save(row);if(!insideTransaction)service.db.exec('COMMIT');return step;
     }catch(error){if(!insideTransaction)service.db.exec('ROLLBACK');throw error;}
   }
@@ -277,6 +293,7 @@ export function installDatasetDeletion(service,{clock=Date.now,pollMs=250,capabi
     const present=(host,name)=>listings.get(host).some(d=>d.dataset===name&&Array.isArray(d.versions)&&d.versions.some(v=>v.version===row.version));
     // Each present node independently authenticates actual immutable provenance.
     for(const [host,names] of view.refs)for(const name of names)if(present(host,name)){
+      service.assertMaintenanceAllowed?.('datasets.delete',{machine:host},principal);
       await service.confirmDatasetNotDeleting(host,{dataset:name,version:row.version},{userId:principal.userId,hostAdmin:principal.role==='admin'});
       const step=claim(row,host,name);
       step.plan=parsePlan(await rpc(principal,check,host,'plan',{operationId:step.operationId,dataset:name,version:row.version,...(principal.role==='admin'&&row.owner!==principal.userId?{adminContinue:true}:{})}),step,principal);save(row);
@@ -330,8 +347,18 @@ export function installDatasetDeletion(service,{clock=Date.now,pollMs=250,capabi
       }
     }
     for(const [host,names] of view.refs)for(const name of names){
+      if(row.skippedMachines?.some(s=>s.machine===host&&s.dataset===name))continue;
       const step=claim(row,host,name);
       if(!step.plan){step.plan=parsePlan(await rpc(principal,check,host,'plan',{operationId:step.operationId,dataset:name,version:row.version,authorization,references:[],...(principal.role==='admin'&&row.owner!==principal.userId?{adminContinue:true}:{})}),step,principal);save(row);}
+      const maintenance=service.maintenanceFor?.(host);
+      if(maintenance&&step.plan.absent===true&&step.plan.complete===false&&step.plan.authority===null
+        &&step.plan.authorityReferences.length===0&&step.plan.authorityAliases.length===0
+        &&!view.records.some(({value})=>[value.source,value.target,value.machine,value.sourceMachine].includes(host))){
+        row.skippedMachines??=[];
+        row.skippedMachines.push({...step,maintenanceDigest:sha(maintenance),checkedAt:new Date(clock()).toISOString()});
+        row.steps=row.steps.filter(s=>s!==step);
+        event(row,'未持有副本，跳过维护服务器',host,'SKIPPED');
+      }
     }
     if(graph(row).digest!==row.graphDigest)fail('数据依赖在准备期间改变，删除已暂停。');
     row.inspectionComplete=true;save(row);

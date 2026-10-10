@@ -7,6 +7,20 @@ const HASH=/^[a-f0-9]{64}$/;
 const STATES=new Set(['READY','REGISTERED','STAGING','PREPARING','FAILED','UNKNOWN']);
 const OWNER_ID=/^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,127}$/;
 
+// A permission-only scan is a lower bound, never a complete container total.
+// Public facts contain fixed managed classes and counts, no directory names.
+export function projectLowerBoundFacts(cache){
+  const unknown={lowerBoundBytes:null,permissionDeniedCount:null,permissionDeniedClasses:null};
+  const count=cache?.permissionDeniedCount,classes=cache?.permissionDeniedClasses,at=cache?.projectCollectedAt;
+  if(cache?.projectUsageComplete!==false||cache.projectBytes!==null||!Number.isSafeInteger(cache.lowerBoundBytes)||cache.lowerBoundBytes<0||
+    !Number.isSafeInteger(count)||count<=0||count>5000000||cache.projectUsageReason!=='permission-denied:'+count||
+    !classes||typeof classes!=='object'||Array.isArray(classes)||!Object.keys(classes).length||
+    Object.entries(classes).some(([name,n])=>!['projects-v2','oci','users'].includes(name)||!Number.isSafeInteger(n)||n<=0)||
+    Object.values(classes).reduce((sum,n)=>sum+n,0)!==count||
+    typeof at!=='string'||!/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/.test(at)||!Number.isFinite(Date.parse(at))||Date.parse(at)<=0||Date.parse(at)>Date.now())return unknown;
+  return {lowerBoundBytes:cache.lowerBoundBytes,permissionDeniedCount:count,permissionDeniedClasses:{...classes}};
+}
+
 export const LAST_COPY_MESSAGE='这可能是这个版本的最后一份完整数据。为避免永久丢失，暂不能按机器删除；节点更新后可用「彻底删除」（7 天内可恢复）。';
 // The legacy detached worker has RuntimeMaxSec=86400. Keep another hour for
 // launch/stop cleanup; a contract test parses its actual systemd-run definition.
@@ -281,9 +295,35 @@ function combinedOwnerLabel(locations,owners){
   return views[0]?.label||'所属用户：未知';
 }
 
+// Display snapshots are isolated by actor + current Portal policy. They never
+// replace the fresh reads used for deletion/source selection and node ACLs.
+export const DATASET_CATALOG_REFRESH_MS=30000;
+export const DATASET_CATALOG_CACHE_TTL_MS=60000;
+const displayCatalogs=new WeakMap();
+const exclusionRefreshes=new WeakMap();
+async function displayListing(service,key,read){
+  const owner=service.datasetCatalogCacheOwner??service;
+  let rows=displayCatalogs.get(owner);if(!rows){rows=new Map();displayCatalogs.set(owner,rows);}
+  const [actor,policy]=JSON.parse(key);
+  for(const previous of rows.keys()){const [id,oldPolicy]=JSON.parse(previous);if(id===actor&&oldPolicy!==policy)rows.delete(previous);}
+  let record=rows.get(key);if(!record){record={value:null,pending:null,expires:0};rows.set(key,record);}
+  if(!record.pending&&record.expires<=Date.now()){
+    const work=Promise.resolve().then(read).then(value=>{
+      if(value.state==='ok'){record.value={...structuredClone(value),collectedAt:new Date().toISOString()};record.expires=Date.now()+DATASET_CATALOG_CACHE_TTL_MS;}
+      return value;
+    });
+    let timer;
+    record.pending=Promise.race([work,new Promise(resolve=>{timer=setTimeout(()=>resolve(null),DATASET_CATALOG_REFRESH_MS);timer.unref?.();})]).catch(()=>null).finally(()=>clearTimeout(timer));
+    Promise.allSettled([work,record.pending]).then(()=>{record.pending=null;});
+  }
+  if(!record.value&&record.pending){let timer;try{await Promise.race([record.pending,new Promise(resolve=>{timer=setTimeout(resolve,250);})]);}finally{clearTimeout(timer);}}
+  return record.value?{...record.value,stale:record.expires<=Date.now(),refreshing:!!record.pending}:
+    {state:'unavailable',datasets:[],loading:true,refreshing:!!record.pending,collectedAt:null};
+}
+
 // Discovery is metadata-only. The elevated principal is confined to list;
 // capabilities, source selection and all mutations keep the member's own ACL.
-export async function datasetCatalogCall(service,principal,operation,args,{refreshRemovalExclusions=true}={}){
+export async function datasetCatalogCall(service,principal,operation,args,{refreshRemovalExclusions=true,displayCache=false}={}){
   if(!args||typeof args!=='object'||Array.isArray(args)||Object.keys(args).some(k=>k!=='machine'))fail('数据集目录参数无效。');
   let user;
   try{user=service.store.get(principal?.userId);}catch{fail('账号不存在或已停用。',403);}
@@ -300,6 +340,7 @@ export async function datasetCatalogCall(service,principal,operation,args,{refre
   if(operation==='datasets.capacity'){
     if(machine===null||!hasMachine(machine))fail('这台机器未授权。',403);
     const value=await service.bridge(machine,'datasets.capacity',owner);
+    const rpcAt=new Date().toISOString();
     checkPolicy();
     const result={machine,available:true};
     for(const key of ['filesystemBytes','availableBytes','reserveBytes','usableBytes']){
@@ -311,8 +352,9 @@ export async function datasetCatalogCall(service,principal,operation,args,{refre
       result[key]=value.inodeUsageKnown===true?value[key]:null;
     }
     const time=value=>typeof value==='string'&&/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,3})?Z$/.test(value)&&Number.isFinite(Date.parse(value))?value:null;
-    result.checkedAt=time(value.checkedAt);
-    result.collectedAt=time(value.collectedAt)??result.checkedAt;
+    result.checkedAt=time(value.checkedAt)??rpcAt;
+    result.collectedAt=time(value.collectedAt)??time(value.checkedAt)??rpcAt;
+    if(!time(value.collectedAt)&&!time(value.checkedAt))result.timestamp='rpc';
     if(value.storageOverview?.protocol==='dataset-storage-node-v1'){
       const byte=value=>Number.isSafeInteger(value)&&value>=0?value:null;
       const volume=value=>{
@@ -321,18 +363,22 @@ export async function datasetCatalogCall(service,principal,operation,args,{refre
         if(Object.values(bytes).some(value=>value===null)||bytes.usedBytes+bytes.availableBytes>bytes.filesystemBytes||
           bytes.usableBytes!==Math.max(0,bytes.availableBytes-bytes.reserveBytes))return null;
         return {...bytes,volumeDeviceId:typeof value.volumeDeviceId==='string'&&HASH.test(value.volumeDeviceId)?value.volumeDeviceId:null,
-          checkedAt:time(value.checkedAt),collectedAt:time(value.collectedAt)??time(value.checkedAt),
+          checkedAt:time(value.checkedAt)??rpcAt,collectedAt:time(value.collectedAt)??time(value.checkedAt)??rpcAt,
+          ...(!time(value.collectedAt)&&!time(value.checkedAt)?{timestamp:'rpc'}:{}),
           readOnly:typeof value.readOnly==='boolean'?value.readOnly:null,guarded:value.guarded===true};
       };
       const facts=value.storageOverview,cache=facts.cache,warehouse=facts.warehouse;
       const cacheVolume=volume(cache?.volume),warehouseVolume=warehouse?.state==='READY'?volume(warehouse.volume):null;
       const projectCollectedAt=time(cache?.projectCollectedAt),projectBytes=byte(cache?.projectBytes);
       const projectUsageComplete=cache?.projectUsageComplete===true&&projectBytes!==null&&projectCollectedAt!==null;
+      const reason=value=>typeof value==='string'?value.replace(/[\p{Cc}\p{Cf}]/gu,' ').trim().slice(0,200):null;
       // Explicit display projection: never copy private owner/project splits,
       // paths, grants or upload credentials from the raw node observation.
       result.storageOverview={protocol:facts.protocol,cache:{volume:cacheVolume,budgetBytes:byte(cache?.budgetBytes),
-        projectBytes:projectUsageComplete?projectBytes:null,projectUsageComplete,projectCollectedAt},
-        warehouse:warehouse===null?null:{state:warehouseVolume?'READY':'UNAVAILABLE',volume:warehouseVolume}};
+        budgetReason:reason(cache?.budgetReason),projectUsageReason:projectUsageComplete?null:reason(cache?.projectUsageReason),
+        projectBytes:projectUsageComplete?projectBytes:null,projectUsageComplete,projectCollectedAt,...projectLowerBoundFacts(cache)},
+        warehouse:warehouse===null?null:{state:warehouseVolume?'READY':'UNAVAILABLE',volume:warehouseVolume,reason:reason(warehouse?.reason)},
+        warehouseReason:warehouse===null?'本机无仓库':reason(facts.warehouseReason)};
       if(cacheVolume&&value.datasetFileList===1)result.datasetFileList=1;
     }
     return {...result,inodeUsageKnown:value.inodeUsageKnown===true,guarded:value.guarded===true,
@@ -342,16 +388,23 @@ export async function datasetCatalogCall(service,principal,operation,args,{refre
   // An explicit administrator refresh may retire a proven terminal or absent
   // exclusion. It never dispatches cleanup or invents an operation identity.
   if(refreshRemovalExclusions&&principal.role==='admin'&&service.db?.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='dataset_removal_exclusions'").get()){
-    try{await createDatasetRemovalGuard(service,principal).refreshExclusions();}
-    catch(error){if(error.code!=='LAST_COPY_UNPROVEN')throw error;}
+    const refresh=()=>createDatasetRemovalGuard(service,principal).refreshExclusions();
+    if(displayCache){
+      let rows=exclusionRefreshes.get(service);if(!rows){rows=new Map();exclusionRefreshes.set(service,rows);}
+      const key=JSON.stringify([user.id,policy]),previous=rows.get(key);
+      if(!previous||previous.expires<=Date.now()&&!previous.pending){
+        const row={expires:Date.now()+DATASET_CATALOG_CACHE_TTL_MS,pending:true};rows.set(key,row);
+        Promise.resolve().then(refresh).catch(()=>{}).finally(()=>{row.pending=false;});
+      }
+    }else{try{await refresh();}catch(error){if(error.code!=='LAST_COPY_UNPROVEN')throw error;}}
   }
   const listings=await Promise.all(MACHINES.map(async m=>{
-    try{
+    const read=async()=>{try{
       // This fixed service identity is confined to this literal list call.
       // It does not provision a legacy workspace for every zero-quota viewer,
       // and must never be forwarded to a content or mutation operation.
       const result=await service.bridge(m.id,'datasets.list',{userId:'builtin-admin',hostAdmin:true});
-      if(!Array.isArray(result?.datasets))throw Error('invalid catalog');
+      if(!Array.isArray(result?.datasets)||result.partial===true||result.complete===false)throw Error('incomplete catalog');
       // Old nodes omit ownerIds (and large ACLs return null). An exact second
       // read as the member can prove use; missing/failed/invalid proofs cannot.
       // New deletion permissions are also actor-bound. Never copy the service
@@ -374,10 +427,16 @@ export async function datasetCatalogCall(service,principal,operation,args,{refre
         }catch{}
       }
       return {machine:m.id,state:'ok',datasets:warehouseProjection(result).datasets,legacy,memberDeletes,datasetDelete:result.datasetDelete===1};
-    }catch{return {machine:m.id,state:'unavailable',datasets:[]};}
+    }catch{return {machine:m.id,state:'unavailable',datasets:[]};}};
+    return displayCache?{...await displayListing(service,JSON.stringify([user.id,policy,m.id]),read),machine:m.id}:read();
   }));
   let capabilities;
-  if(machine!==null&&hasMachine(machine))try{capabilities=await service.transferCall?.({...principal,role:'member'},'transfers.capabilities',{machine});}catch{}
+  if(machine!==null&&hasMachine(machine))try{
+    if(displayCache){
+      const snapshot=await displayListing(service,JSON.stringify([user.id,policy,'transfer',machine]),async()=>({state:'ok',datasets:[],capabilities:await service.transferCall?.({...principal,role:'member'},'transfers.capabilities',{machine})}));
+      capabilities=snapshot.stale?null:snapshot.capabilities;
+    }else capabilities=await service.transferCall?.({...principal,role:'member'},'transfers.capabilities',{machine});
+  }catch{}
   checkPolicy();
   const replicaSources=capabilities?.enabled===true&&Array.isArray(capabilities.sources)?capabilities.sources.filter(id=>MACHINES.some(m=>m.id===id)):[];
   const datasets=new Map();
@@ -391,7 +450,7 @@ export async function datasetCatalogCall(service,principal,operation,args,{refre
       if(typeof value?.version!=='string'||!HASH.test(value.version))continue;
       const ids=ownerIds(item),ref={dataset:item.dataset,version:value.version};
       const own=ids?ids.includes(user.id):item.ownerIds==null&&listing.legacy?.has(item.dataset+'@'+value.version)===true;
-      const canUse=own&&(hasMachine(listing.machine)||service.archiveSourceAllowed?.(user.id,listing.machine,ref)===true||service.datasetIngressSourceAllowed?.(user.id,listing.machine,ref)===true);
+      const canUse=!listing.stale&&own&&(hasMachine(listing.machine)||service.archiveSourceAllowed?.(user.id,listing.machine,ref)===true||service.datasetIngressSourceAllowed?.(user.id,listing.machine,ref)===true);
       // Never apply this viewer's historical aliases to somebody else's new
       // registration. Unknown ownership needs the same precise member proof.
       const alias=own?(aliasesFor(listing.machine)?.get(item.dataset+'@'+value.version)||service.archiveAliases?.(user.id,listing.machine)?.get(item.dataset+'@'+value.version)):null;
@@ -426,7 +485,10 @@ export async function datasetCatalogCall(service,principal,operation,args,{refre
   const deletionCapabilities=MACHINES.some(m=>hasMachine(m.id))&&listings.every(l=>l.datasetDelete)&&service.datasetDeleteCapabilities?await service.datasetDeleteCapabilities(principal):{datasetDelete:0};
   checkPolicy();
   const localAvailable=listings.find(m=>m.machine===machine)?.state==='ok',targetAllowed=machine!==null&&hasMachine(machine);
-  return {machine,...deletionCapabilities,partial:listings.some(m=>m.state!=='ok'),machines:listings.map(({machine,state})=>({machine,state})),
+  const collected=listings.map(row=>row.collectedAt).filter(Boolean);
+  return {machine,...deletionCapabilities,partial:listings.some(m=>m.state!=='ok'),loading:listings.some(m=>m.loading),stale:listings.some(m=>m.stale),refreshing:listings.some(m=>m.refreshing),
+    checkedAt:collected.length?collected.reduce((a,b)=>Date.parse(a)<Date.parse(b)?a:b):new Date().toISOString(),
+    machines:listings.map(({machine,state,collectedAt,loading,stale})=>({machine,state,...(collectedAt?{collectedAt}:{}),...(loading?{loading:true}:{}),...(stale?{stale:true}:{})})),
     datasets:[...datasets.values()].sort((a,b)=>a.dataset.localeCompare(b.dataset)).map(item=>({dataset:item.dataset,
       ...(service.datasetLabelView?.(user.id,item.dataset)||{}),versions:[...item.versions.values()].sort((a,b)=>a.version.localeCompare(b.version)).map(version=>{
       const canUse=version.locations.some(l=>l.canUse),usableLocal=version.locations.filter(l=>l.machine===machine&&l.canUse);

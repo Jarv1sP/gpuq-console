@@ -1,7 +1,7 @@
 import {maintenanceFor,restoreMaintenanceControls,disableMaintenanceControls} from './maintenance-state.js';
 // Editable personal data is deliberately separate from verified training data.
 // Raw uploads never unpack or publish a dataset automatically.
-import {CHUNK_BYTES,LARGE_RELAY_BYTES} from './dataset-upload.js';
+import {CHUNK_BYTES,LARGE_RELAY_BYTES,MAX_MANIFEST_BYTES,SHA256} from './dataset-upload.js';
 import {cloudFilesHTML,cloudFilesUI} from './cloud-files-ui.js';
 const esc=value=>String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
 const bytesLabel=value=>{const size=value;if(!Number.isFinite(size)||size<0)return '未知';return size<1024**2?(size/1024).toFixed(1)+' KiB':size<1024**3?(size/1024**2).toFixed(1)+' MiB':(size/1024**3).toFixed(2)+' GiB';};
@@ -35,22 +35,54 @@ export function workspaceEntriesHTML(result){
   const parent=result?.path||'.';
   return (result?.entries||[]).map(entry=>{
     const path=parent==='.'?entry.name:parent+'/'+entry.name;
-    return `<li><span>${entry.type==='directory'?'目录':entry.type==='file'?'文件':'不可下载'}</span><code title="${esc(entry.name)}">${esc(entry.name)}</code><small>${entry.type==='directory'?'':esc(bytesLabel(entry.size))}</small>${entry.type==='directory'?`<button class="button" type="button" data-workspace-path="${esc(path)}">打开</button>`:entry.type==='file'?`<button class="button" type="button" data-workspace-download="${esc(path)}">下载</button>`:''}</li>`;
-  }).join('')||'<li class="data-workspace-empty">此目录为空。可上传文件，或在数据终端里创建目录。</li>';
+    return `<li><span>${entry.type==='directory'?'目录':entry.type==='file'?'文件':'不可下载'}</span><code title="${esc(entry.name)}">${esc(entry.name)}</code><small>${entry.type==='directory'?'':esc(bytesLabel(entry.size))}${entry.readOnly===true&&entry.type==='file'&&entry.sha256==null?' · 原清单无 SHA':''}</small>${entry.type==='directory'?`<button class="button" type="button" data-workspace-path="${esc(path)}">打开</button>`:entry.type==='file'?`<button class="button" type="button" data-workspace-download="${esc(path)}">下载</button>`:''}</li>`;
+  }).join('')||(result?.readOnly===true?'<li class="data-workspace-empty">此目录为空。</li>':'<li class="data-workspace-empty">此目录为空。可上传文件，或在数据终端里创建目录。</li>');
 }
 export const WORKSPACE_DOWNLOAD_MEMORY_BYTES=100*1024**2;
-export async function downloadWorkspaceFile({machine,path,call,write,signal,onProgress=()=>{},limitBytes=Infinity}){
-  workspacePath(path);let offset=0,size=null;
+export async function downloadWorkspaceFile({machine,path,call,write,signal,onProgress=()=>{},limitBytes=Infinity,manifestVersion}){
+  workspacePath(path);let offset=0,size=null,identity,expected,hash;
   const check=()=>{if(signal?.aborted)throw Error('下载已停止。');};
   do{
-    check();const result=await call('datasets.workspace.get',{machine,path,offset});check();
+    check();const result=await call('datasets.workspace.get',{machine,path,offset,...(identity?{fingerprint:identity.fingerprint}:{})});check();
     if(result?.path!==path||result.offset!==offset||!Number.isSafeInteger(result.size)||result.size<0||size!==null&&result.size!==size||typeof result.eof!=='boolean')throw Error('文件读取结果不一致，请刷新后重新下载。');
     size=result.size;if(size>limitBytes)throw Error('此浏览器只能下载 100 MiB 以内的文件；大文件请换用支持直接保存文件的桌面浏览器。');
     if(typeof result.data!=='string'||result.data.length>Math.ceil(CHUNK_BYTES/3)*4||result.data.length%4||! /^[A-Za-z0-9+/]*={0,2}$/.test(result.data))throw Error('文件片段无效，下载已停止。');
     const bytes=Uint8Array.from(atob(result.data),char=>char.charCodeAt(0));
     if(bytes.length!==Math.min(CHUNK_BYTES,size-offset)||result.eof!==(offset+bytes.length===size))throw Error('文件片段不完整，下载已停止。');
+    if(offset===0){
+      identity=result.recovery??null;
+      if(manifestVersion!==undefined&&(identity?.filePath!==null||identity.version!==manifestVersion))throw Error('原清单身份不一致。');
+      if(identity!==null){
+        const h=/^[a-f0-9]{64}$/;
+        if(identity.protocol!==1||!h.test(identity.version)||!h.test(identity.fingerprint)||identity.size!==size||
+          identity.sha256!==null&&!h.test(identity.sha256)||typeof identity.manifestPath!=='string'||!identity.manifestPath.endsWith('/'+identity.version+'/manifest.json'))throw Error('历史文件的原清单身份未确认。');
+        workspacePath(identity.manifestPath);hash=new SHA256();
+        if(identity.filePath===null){
+          if(path!==identity.manifestPath||identity.sha256!==identity.version)throw Error('历史清单身份不一致。');
+          expected={size,sha256:identity.version};
+        }else{
+          workspacePath(identity.filePath);
+          if(path!==identity.manifestPath.slice(0,-'manifest.json'.length)+'data/'+identity.filePath)throw Error('历史文件不属于原清单路径。');
+          const chunks=[];
+          const proof=await downloadWorkspaceFile({machine,path:identity.manifestPath,call,signal,limitBytes:MAX_MANIFEST_BYTES,manifestVersion:identity.version,write:bytes=>chunks.push(bytes)});check();
+          if(proof.recovery?.verified!==true||proof.recovery.version!==identity.version)throw Error('原清单 SHA 未通过校验。');
+          const data=new Uint8Array(proof.bytes);let at=0;for(const chunk of chunks){data.set(chunk,at);at+=chunk.length;}
+          let manifest;try{manifest=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(data));}catch{throw Error('原清单无法读取。');}
+          const files=manifest?.schema===1&&Array.isArray(manifest.files)?manifest.files.filter(entry=>entry?.path===identity.filePath):[];
+          expected=files.length===1?files[0]:null;
+          if(!expected||!Number.isSafeInteger(expected.size)||expected.size!==size||(expected.sha256??null)!==identity.sha256)throw Error('历史文件的大小或 SHA 与原清单不一致。');
+        }
+      }
+    }
+    if(JSON.stringify(result.recovery??null)!==JSON.stringify(identity))throw Error('历史文件身份已改变，下载已停止。');
+    hash?.update(bytes);
     check();await write(bytes);check();offset+=bytes.length;onProgress({bytes:offset,totalBytes:size});
-    if(result.eof)return {path,bytes:offset};
+    if(result.eof){
+      if(!identity)return {path,bytes:offset};
+      const sha256=hash.hex();
+      if(expected.sha256!=null&&sha256!==expected.sha256)throw Error('文件 SHA 与原清单不一致；未确认取回成功。');
+      return {path,bytes:offset,recovery:{version:identity.version,verified:expected.sha256!=null,sha256,expectedSha256:expected.sha256??null}};
+    }
   }while(true);
 }
 export function workspaceRegistrationsHTML(result){
@@ -58,6 +90,7 @@ export function workspaceRegistrationsHTML(result){
   return result.datasets.filter(row=>typeof row.dataset==='string'&&Array.isArray(row.versions)&&row.versions.length===0).map(row=>`<li><code title="${esc(row.dataset)}">${esc(row.name||row.dataset)}</code><span>没有登记版本</span></li>`).join('')||'<li>没有空登记。</li>';
 }
 export function publicationText(status){
+  if(status.workspaceBusy===true&&typeof status.workspaceError==='string'&&status.workspaceError)return status.workspaceError;
   const phases={SCANNING:'扫描文件',REGISTERING:'登记数据集',REGISTERED:'登记完成',ARCHIVE_INTENT:'保存到仓库',MATERIALIZING:'复制与校验',COMPLETED:'完成'};
   const phase=typeof status.phase==='string'&&status.phase?phases[status.phase]||status.phase:'';
   if(status.state==='READY')return `已发布：${status.dataset}@${status.version}。可在数据集目录选择用于训练。`;
@@ -125,7 +158,7 @@ export function dataWorkspaceUI(store,section,toast,{onBusyChange=()=>{},refresh
     const path=workspacePath(element('[name=data-workspace-browse-path]').value.trim(),{root:true});
     const listing=await call('datasets.workspace.list',{machine,path});element('#data-workspace-files-list').innerHTML=workspaceEntriesHTML(listing);
     const status=await call('datasets.workspace.status',{machine});
-    if(status.operationId||status.state!=='EDITABLE')report(publicationText(status));
+    if(status.workspaceBusy===true||status.operationId||status.state!=='EDITABLE')report(publicationText(status));
     else report('个人目录已刷新。这里的文件可编辑，已发布的数据集不会随之改变。');
     if(status.state==='READY')await refreshCatalog();
     if(element('#data-workspace-registrations').open)await registrations({call,machine,check});
@@ -175,7 +208,7 @@ export function dataWorkspaceUI(store,section,toast,{onBusyChange=()=>{},refresh
         check();if(writer){await writer.close();writer=null;check();}else{
           const url=URL.createObjectURL(new Blob(chunks)),link=document.createElement('a');link.href=url;link.download=path.split('/').pop();link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
         }
-        report('已下载 '+path+' · '+bytesLabel(result.bytes));
+        report('已下载 '+path+' · '+bytesLabel(result.bytes)+(result.recovery?(result.recovery.verified?' · 已校验':' · 原清单无 SHA'):''));
       }catch(error){if(error.name==='AbortError'){check();report('已取消下载。');return;}throw error;}
       finally{if(writer)await writer.abort().catch(()=>{});}
     });

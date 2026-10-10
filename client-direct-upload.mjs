@@ -1,3 +1,4 @@
+import {approvedCampusEndpoints,chooseCampusEndpoint,sameCampusEndpoints,campusConnectionFailure} from './client-campus-endpoints.mjs';
 import {Agent,request as httpsRequest} from 'node:https';
 import {connect as tlsConnect} from 'node:tls';
 import {createHash,timingSafeEqual} from 'node:crypto';
@@ -33,7 +34,7 @@ export function validateDirectGrant(value,now=Date.now()/1000){
 // A self-signed node certificate is trusted only by its portal-issued SHA256
 // pin. The Agent receives the socket AFTER the pin check, so the HTTP request
 // (including its bearer) cannot be written to an unverified TLS peer.
-export function pinnedUploadAgent(certificateSha256,{connect=tlsConnect,timeoutMs=15000}={}){
+export function pinnedUploadAgent(certificateSha256,{connect=tlsConnect,timeoutMs=15000,dialEndpoint,serverName}={}){
   if(!/^[a-f0-9]{64}$/.test(certificateSha256||''))denied('Invalid upload certificate pin');
   const agent=new Agent({keepAlive:true,maxSockets:1,maxFreeSockets:1});
   agent.createConnection=(options,callback)=>{
@@ -41,7 +42,8 @@ export function pinnedUploadAgent(certificateSha256,{connect=tlsConnect,timeoutM
     const finish=(error)=>{if(finished)return;finished=true;clearTimeout(timer);if(error){socket?.destroy();callback(error);}else callback(null,socket);};
     const timer=setTimeout(()=>finish(probeError('Direct upload TLS connection timed out','TIMEOUT')),timeoutMs);timer.unref?.();
     try{
-      socket=connect({...options,rejectUnauthorized:false,minVersion:'TLSv1.2',ALPNProtocols:['http/1.1']});
+      const dial=dialEndpoint?new URL(dialEndpoint):undefined;
+      socket=connect({...options,...(dial?{host:dial.hostname,port:Number(dial.port||443),servername:serverName||options.servername}:{}),rejectUnauthorized:false,minVersion:'TLSv1.2',ALPNProtocols:['http/1.1']});
       socket.once('error',error=>finish(probeError('Direct upload TLS connection failed',connectionCode(error))));
       socket.once('secureConnect',()=>{
         try{
@@ -82,15 +84,15 @@ export function directUploadRequest(grant,agent,{uploadId,action,path,offset,byt
           try{const value=JSON.parse(Buffer.concat(parts).toString('utf8'));if(value.ok!==true||!value.result||typeof value.result!=='object')throw Error();finish(null,value.result);}catch{finish(Error('Direct upload returned an invalid receipt'));}
         });
       });
-      req.on('error',error=>finish(Error(error.message?.startsWith('Direct upload ')?error.message:'Direct upload connection failed; no file bytes were redirected through the portal')));
-      timer=setTimeout(()=>finish(Error('Direct upload timed out; repeat the same command to resume')),timeoutMs);timer.unref?.();
+      req.on('error',error=>finish(Object.assign(Error(error.message?.startsWith('Direct upload ')?error.message:'Direct upload connection failed; no file bytes were redirected through the portal'),{code:'CONNECTION_FAILED'})));
+      timer=setTimeout(()=>finish(Object.assign(Error('Direct upload timed out; repeat the same command to resume'),{code:'TIMEOUT'})),timeoutMs);timer.unref?.();
       req.end(writing?bytes:undefined);
     }catch{finish(Error('Direct upload request could not be started'));}
   });
 }
 
 export async function probeDirectUploadRoute(route,{request=httpsRequest,timeoutMs=2500,agentFactory=pinnedUploadAgent}={}){
-  const agent=agentFactory(route.certificateSha256,{timeoutMs});
+  const agent=agentFactory(route.certificateSha256,{timeoutMs:route.probeTimeoutMs??timeoutMs,dialEndpoint:route.dialEndpoint,serverName:new URL(route.endpoint).hostname});
   try{return await new Promise((resolve,reject)=>{
     let req,timer,done=false;
     const finish=(error,value)=>{if(done)return;done=true;clearTimeout(timer);if(error){req?.destroy();reject(error);}else resolve(value);};
@@ -105,14 +107,23 @@ export async function probeDirectUploadRoute(route,{request=httpsRequest,timeout
           try{finish(null,JSON.parse(Buffer.concat(parts)));}catch{finish(probeError('Invalid upload probe','INVALID_RESPONSE'));}});
       });
       req.on('error',error=>finish(probeError('Upload probe connection failed',uploadProbeFailureCode(error))));
-      timer=setTimeout(()=>finish(probeError('Upload probe timed out','TIMEOUT')),timeoutMs);timer.unref?.();req.end();
+      timer=setTimeout(()=>finish(probeError('Upload probe timed out','TIMEOUT')),route.probeTimeoutMs??timeoutMs);timer.unref?.();req.end();
     }catch{finish(probeError('Upload probe could not start','PROBE_FAILED'));}
   });}finally{agent.destroy();}
 }
 
-export async function createDirectDatasetTransport(requestGrant,{uploadId,route,agentFactory=pinnedUploadAgent,send=directUploadRequest,now=()=>Date.now()/1000}={}){
-  let grant=assertUploadRouteGrant(validateDirectGrant(await requestGrant(),now()),route),agent=agentFactory(grant.certificateSha256),closed=false;
-  const endpoint=grant.endpoint,pin=grant.certificateSha256;
+export async function createDirectDatasetTransport(requestGrant,{uploadId,route,agentFactory=pinnedUploadAgent,send=directUploadRequest,probe,observe,now=()=>Date.now()/1000}={}){
+  let grant=assertUploadRouteGrant(validateDirectGrant(await requestGrant(),now()),route),closed=false;
+  const endpoints=approvedCampusEndpoints(grant,grant.routes??route?.routes);
+  if(route?.routes)sameCampusEndpoints(approvedCampusEndpoints(grant,route.routes),endpoints);
+  if(route?.dialEndpoint&&!endpoints.some(e=>e.endpoint===route.dialEndpoint))throw Error('Probed campus endpoint changed before authorization');
+  const fixed={endpoint:grant.endpoint,pin:grant.certificateSha256,revision:grant.revision,machine:grant.machine};
+  probe??=((value,endpoint)=>probeDirectUploadRoute({...value,dialEndpoint:endpoint.endpoint,probeTimeoutMs:endpoint.id==='node-lan'?1000:2500}));
+  let selected=endpoints.find(e=>e.endpoint===route?.dialEndpoint)??endpoints.find(e=>e.id==='primary');
+  if(!route?.dialEndpoint&&endpoints.length>1)selected=await chooseCampusEndpoint(grant,endpoints,{probe});
+  const makeAgent=()=>agentFactory(fixed.pin,{dialEndpoint:selected.endpoint,serverName:new URL(fixed.endpoint).hostname});
+  let agent=makeAgent();const files=new Map();
+  const dispatch=(action,args)=>send(grant,agent,{uploadId,action,...args});
   return {
     kind:route?.kind||'campus-direct',
     get chunkBytes(){return grant.maxChunkBytes??CHUNK;},
@@ -120,11 +131,31 @@ export async function createDirectDatasetTransport(requestGrant,{uploadId,route,
       if(closed)denied('Direct upload transport is closed');
       if(grant.expiresAt<=now()+10){
         const next=assertUploadRouteGrant(validateDirectGrant(await requestGrant(),now()),route);
-        if(next.endpoint!==endpoint||next.certificateSha256!==pin)denied('Direct upload destination changed; repeat the command to re-authorize');
-        grant=next;
+        if(next.endpoint!==fixed.endpoint||next.certificateSha256!==fixed.pin||next.revision!==fixed.revision||next.machine!==fixed.machine)denied('Direct upload destination changed; repeat the command to re-authorize');
+        sameCampusEndpoints(endpoints,approvedCampusEndpoints(next,next.routes??route?.routes));grant=next;
       }
-      return send(grant,agent,{uploadId,action,...args});
-    },
-    close(){closed=true;agent.destroy();}
+      let result;
+      try{result=await dispatch(action,args);}
+      catch(error){
+        if(endpoints.length!==2||!campusConnectionFailure(error))throw error;
+        await agent.destroy();selected=await chooseCampusEndpoint(grant,endpoints,{probe,exclude:selected.endpoint,retryExcluded:true});agent=makeAgent();
+        if(action==='status')result=await dispatch(action,args);
+        else {
+          let offset,receipt;
+          if(action==='manifest'){
+            if(typeof observe!=='function')throw error;
+            receipt=await observe();
+            if(receipt?.uploadId!==uploadId||!['RECEIVING_MANIFEST','SEALING','UPLOADING'].includes(receipt.state))denied('Original manifest identity changed');offset=receipt.manifestOffset;
+          }else{
+            const expected=files.get(args.path);receipt=await dispatch('status',{path:args.path});const file=receipt?.file;
+            if(!expected||!file||['path','size','sha256'].some(k=>file[k]!==expected[k]))denied('Original file identity changed');offset=file.offset;
+          }
+          if(!Number.isSafeInteger(offset))denied('Original offset unconfirmed');
+          if(offset===args.offset+args.bytes.length&&(args.bytes.length>0||receipt.file?.complete===true))result={offset,...(receipt.file?.complete===true?{complete:true}:{})};
+          else if(offset===args.offset)result=await dispatch(action,args);else denied('Original offset unconfirmed');
+        }
+      }
+      if(action==='status'&&result?.file)files.set(args.path,{...result.file});return result;
+    },async close(){closed=true;await agent.destroy();}
   };
 }
