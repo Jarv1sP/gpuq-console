@@ -256,6 +256,12 @@ test('guide explains quotas, interruption and failure evidence without promising
 });
 
 test('single warehouse intake separates complete warehouse data from prepared training cache',()=>{
+  assert.match(guide,/管理员配置共享目录后/);
+  assert.match(guide,/不是读取上述共享目录的前置步骤/);
+  assert.match(guide,/本节仅适用于缓存模式；共享原目录和符合条件的仓库直读不需要这一步/);
+  assert.match(guide,/跳过的是“仓库到训练缓存”的复制，不会跳过“原目录入库”的发布或复制/);
+  assert.match(guide,/入库仍在忙、超时或未完成时，不能靠这个参数把它变成可用版本/);
+  assert.match(guide,/默认不加 `--data-read` 即使用缓存/);
   assert.match(guide,/已有文件或外接硬盘中的大数据，先核对是否已有共享只读路径/);
   assert.match(guide,/能够直接读取就共用原目录，不必再入库/);
   assert.match(guide,/需要固定快照或跨机副本时，联系管理员从原位置整理并入仓库/);
@@ -295,7 +301,8 @@ test('troubleshooting separates confirmed misunderstandings from unavailable fea
   assert.match(section, /保留原任务编号和 `Submission key`，不要另建一份训练/);
   assert.match(section, /节点配置的安全预留；这不是个人容量额度用完/);
   assert.match(section, /上传 `READY` 不等于可以立即训练/);
-  assert.match(section, /数据已完整存入仓库；所选机器的本地训练缓存也须准备到 `READY`/);
+  assert.match(section, /数据已完整存入仓库；使用缓存模式时，所选机器的本地训练缓存也须准备到 `READY`/);
+  assert.match(section, /选择仓库直读则核对本机仓库版本、节点能力和权限，不要求缓存副本/);
   assert.match(section, /两者都不等于独立备份/);
   assert.match(section, /已经永久取消的归档要由管理员核查/);
   assert.match(section, /要另开独立会话，选「新建终端」或运行 `gpuctl ssh`/);
