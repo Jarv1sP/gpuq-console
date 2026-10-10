@@ -24,9 +24,11 @@ export function diagnosticsHTML(bundle){
 
 const terminalStates=new Set(['SUCCEEDED','FAILED','CANCELED']);
 const confirmedObservation=value=>value?.protocol==='native-observation-v1'&&value.readOnly===true&&value.status==='CONFIRMED';
-export const completionMatchesJob=(value,job)=>value?.protocol==='job-completion-v1'&&value.readOnly===true&&value.jobId===job.id&&value.userId===job.userId&&value.machine===job.machine&&value.nodeJobId===(job.nodeJobId||null)&&typeof value.completed==='boolean'&&['SUCCEEDED','UNCONFIRMED'].includes(value.state)&&(!value.completed||value.state==='SUCCEEDED'&&!!value.completedAttempt?.id);
+export const completionMatchesJob=(value,job)=>value?.protocol==='job-completion-v1'&&value.readOnly===true&&value.jobId===job.id&&value.userId===job.userId&&value.machine===job.machine&&value.nodeJobId===(job.nodeJobId||null)&&typeof value.completed==='boolean'&&['SUCCEEDED','UNCONFIRMED','WAITING'].includes(value.state)&&(!value.completed||value.state==='SUCCEEDED'&&!!value.completedAttempt?.id);
 const observedStates={PENDING:'排队中',STARTING:'启动中',RUNNING:'运行中',PREEMPTING:'让位中',SUCCEEDED:'成功',FAILED:'失败',CANCELED:'已取消',LOST:'失联'};
 export function nativeObservationHTML(observation){
+  if(observation?.protocol==='native-observation-v1'&&observation.readOnly===true&&observation.status==='WAITING')
+    return '<p data-native-observation>等待节点确认</p>';
   if(!confirmedObservation(observation))return '<p data-native-observation>服务器上的状态待确认</p>';
   const attempt=observation.latestAttempt;
   return `<p data-native-observation><strong>${observation.retryDetected?'已观察到服务器重试':'服务器当前观察'} · ${esc(observedStates[observation.state]||'待确认')}</strong></p><dl class="job-overview-grid"><div><dt>观察时间</dt><dd>${esc(timestamp(observation.observedAt))}</dd></div><div><dt>最近一次运行</dt><dd>${attempt?.ordinal?'第 '+esc(attempt.ordinal)+' 次':'尚未开始'}${attempt?.id?` · <code>${esc(attempt.id)}</code>`:''}</dd></div></dl>`;
@@ -34,7 +36,7 @@ export function nativeObservationHTML(observation){
 export function completionHTML(value){
   if(!value)return '';
   const completed=value.protocol==='job-completion-v1'&&value.completed===true&&value.state==='SUCCEEDED';
-  return `<p data-job-completion><strong>${completed?'已核验完成':'完成待确认'}</strong>${completed?` · 第 ${esc(value.completedAttempt?.ordinal??'未知')} 次运行 · ${esc(timestamp(value.observedAt))}`:''}</p>`;
+  return `<p data-job-completion><strong>${completed?'已核验完成':value.state==='WAITING'?'等待中':'完成待确认'}</strong>${completed?` · 第 ${esc(value.completedAttempt?.ordinal??'未知')} 次运行 · ${esc(timestamp(value.observedAt))}`:''}</p>`;
 }
 
 export function createJobDiagnostics(store,getDialog,toast,options={}){

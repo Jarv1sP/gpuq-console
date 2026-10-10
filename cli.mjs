@@ -18,7 +18,7 @@ import {progressText,jobTimingText} from './dist/job-progress.js';
 import {elasticAllocation,allocationLabel,gpuPlacement} from './dist/gpu-allocation.js';
 import {displayName,taskDescription} from './dist/task-metadata.js';
 import {apiPost} from './client-http.mjs';
-import {readCLIState} from './client-state.mjs';
+import {readCLIState,submitJobWithReceipt} from './client-state.mjs';
 import {publishProject,requestProjectPublication,publicationUnconfirmed} from './client-project-publication.mjs';
 import {defaultPlatformControlTransport,finishPlatformControlTransport} from './client-windows-control.mjs';
 import {createDatasetHashJournal,originalDatasetUploadId} from './client-dataset-hash-journal.mjs';
@@ -906,7 +906,9 @@ async function main(){
         }
         process.stderr.write(`Project: ${context.project} · release: ${context.release}\n`);
       }
-      result=(await call('jobs.submit',{machine:positionals[1],...(automatic?{machineSelection:{mode:'auto',...(candidates?{candidates}:{})}}:{}),cards,minVramGiB:Number(options['min-vram']||0),name:options.name||'train',...(options.description!==undefined?{description:taskDescription(options.description)}:{}),argv:training,key,...(options.priority?{priority:options.priority}:{}),...(scheduling?{scheduling}:{}),...(elastic?{elastic}:{}),...(placement?{placement}:{}),...context,...(datasets.length?{datasets,prepareData:true}:{}),...(options['data-read']==='warehouse'?{datasetReadMode:'warehouse'}:{})})).result;
+      const receipt=await submitJobWithReceipt(call,{machine:positionals[1],...(automatic?{machineSelection:{mode:'auto',...(candidates?{candidates}:{})}}:{}),cards,minVramGiB:Number(options['min-vram']||0),name:options.name||'train',...(options.description!==undefined?{description:taskDescription(options.description)}:{}),argv:training,key,...(options.priority?{priority:options.priority}:{}),...(scheduling?{scheduling}:{}),...(elastic?{elastic}:{}),...(placement?{placement}:{}),...context,...(datasets.length?{datasets,prepareData:true}:{}),...(options['data-read']==='warehouse'?{datasetReadMode:'warehouse'}:{})},session.principal);
+      result=receipt.result;
+      if(receipt.receiptRecovered)process.stderr.write(`按原 key 找回已登记任务 ${result.id}；未重复提交。\n`);
     }else if(command==='jobs'&&positionals.length===1)result=state.jobs;
     else if(command==='priority'&&positionals.length===3){
       if(!['idle','normal','high','P0','P1','P2','P3','P4'].includes(positionals[2]))fail('Queue rank must be P0..P4 (or idle, normal, high); yielding/restart stay unchanged');

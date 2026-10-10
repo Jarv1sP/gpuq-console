@@ -257,12 +257,21 @@ export function pendingJobReason(service,job,now=Date.now()){
   const machine=MACHINES.find(m=>m.id===job.machine),jobs=service.store.jobs||[];
   const shared=job.placement?.shared===true||job.spec?.placement?.shared===true;
   if(fresh&&machine){
-    const native=host.gpuq.jobs||[],occupied=new Set();
+    const native=host.gpuq.jobs||[],occupied=new Set(),draining=new Set();
     const nativeReason=native.find(row=>row.id===job.nodeJobId&&row.state==='PENDING')?.state_reason;
     if(typeof nativeReason==='string'&&nativeReason.trim())return nativeReason.slice(0,400);
-    const add=indices=>{for(const index of indices||[])if(Number.isSafeInteger(index)&&index>=0&&index<machine.cards)occupied.add(index);};
+    const add=(indices,into=occupied)=>{for(const index of indices||[])if(Number.isSafeInteger(index)&&index>=0&&index<machine.cards)into.add(index);};
     for(const row of native)if(['STARTING','RUNNING','PREEMPTING','CANCELING'].includes(row.state))add(row.assigned_gpu_indices);
     for(const row of jobs)if(row.machine===job.machine&&['STARTING','RUNNING','PREEMPTING','CANCELING'].includes(row.state))add(row.assignedIndices);
+    // A canceled native job can retain its allocation while descendants exit.
+    // Low utilization and an empty CUDA process list do not release that lease.
+    for(const row of jobs){
+      const checked=Date.parse(row.schedulerCheckedAt),elapsed=now-checked;
+      if(row.machine===job.machine&&row.latestAttempt?.state==='DRAINING'&&row.latestAttempt.finishedAt==null&&
+        Number.isFinite(elapsed)&&elapsed>=-30000&&elapsed<=180000){
+        add(row.assignedIndices);add(row.assignedIndices,draining);
+      }
+    }
     for(const gpu of host.gpus||[])if(gpu.processesAvailable===true&&gpu.processes?.length)add([gpu.index]);
     // An occupied card can still accept an explicitly shared job. In particular
     // process count is not a lease count or a declared sharing-person limit.
@@ -275,7 +284,7 @@ export function pendingJobReason(service,job,now=Date.now()){
       const known=new Set(jobs.filter(row=>row.machine===job.machine).map(row=>row.nodeJobId).filter(Boolean));
       const other=[...new Map(native.filter(row=>row.state==='PENDING'&&row.id!==job.nodeJobId&&!known.has(row.id)).map(row=>[row.id,row])).values()];
       const ahead=[...pending,...other].filter(before).length;
-      return `显卡已满（${occupied.size}/${machine.cards} 张被占用，前面还有 ${ahead} 个排队）`;
+      return `显卡已满（${occupied.size}/${machine.cards} 张被占用，${draining.size?`其中 ${draining.size} 张等待任务收尾，`:''}前面还有 ${ahead} 个排队）`;
     }
     // The current node contract exposes share_gpu, not a maximum people count.
     // Only an explicit node state_reason can confirm that limit (handled above).
@@ -722,7 +731,8 @@ export async function executionCall(service,principal,operation,args,readContext
     if(job.nodeJobId)try{result=await service.bridge(job.machine,'watch',{job:job.spec,expectedNodeJobId:job.nodeJobId});}catch{}
     if(service.closing||JSON.stringify(service.store.get(principal.userId))!==actorSnapshot||JSON.stringify(job)!==snapshot)
       fail('授权或任务状态已改变，请重新查询完成状态。',409);
-    return jobCompletion(job,result);
+    const completion=jobCompletion(job,result);
+    return completion.state==='WAITING'?{...completion,queueReason:pendingJobReason(service,job)}:completion;
   }
   if(operation==='jobs.watch'){
     if(Object.keys(args).some(k=>k!=='jobId'))fail('进度查询参数无效。');

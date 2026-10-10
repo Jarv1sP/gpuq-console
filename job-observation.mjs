@@ -146,6 +146,19 @@ export function jobCompletion(job,result){
   const reject=reason=>({...base,reason});
   if(job.spec.id!==job.id||job.spec.userId!==job.userId)return reject('IMMUTABLE_IDENTITY_MISMATCH');
   if(job.cancelRequested||job.state==='CANCELED')return reject('PORTAL_CANCELLATION_REQUIRES_REVIEW');
+  const queued=['SUBMITTING','PENDING','QUEUED','PREPARING_DATA'].includes(job.state)&&!job.latestAttempt&&
+    base.submission.status==='RECORDED';
+  // Admission is durable before dispatch is confirmed. A missing native ID in
+  // that phase is expected, not evidence of a lost record or a host-side retry.
+  // Unknown/terminal history and any existing attempt retain the strict path.
+  if(queued&&(!job.nodeJobId||observation.status==='CONFIRMED'&&observation.state==='PENDING'&&
+      !observation.latestAttempt&&!observation.retryDetected)){
+    const nativeObservation=job.nodeJobId?{...observation,manualRecovery:{required:false,reason:null},message:'任务正在排队。'}:
+      {protocol:'native-observation-v1',readOnly:true,status:'WAITING',retryDetected:false,
+        manualRecovery:{required:false,reason:null},message:'提交已登记，等待节点确认。'};
+    return {...base,state:'WAITING',reason:job.nodeJobId?'JOB_PENDING':'SUBMISSION_PENDING',
+      nativeObservation,message:nativeObservation.message};
+  }
   if(observation.status!=='CONFIRMED')return reject('NATIVE_OBSERVATION_UNAVAILABLE');
   // The native watch also confirms no live scheduler consumer and completed
   // dataset-lease cleanup. A SUCCEEDED field in an arbitrary log is not proof.
