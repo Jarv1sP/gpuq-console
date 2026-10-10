@@ -126,9 +126,25 @@ class LockWaitTests(unittest.TestCase):
                 self.assertEqual(D._LOCK_WAIT.get()['remaining'], remaining)
 
     def test_invalid_or_unbounded_policy_is_rejected(self):
-        for policy in ({'timeout':True}, {'timeout':float('nan')}, {'timeout':61}, {'total':301}, {'total':-1}, {'canceled':'stop'}):
+        for policy in ({'timeout':True}, {'timeout':float('nan')}, {'timeout':61}, {'total':301}, {'total':-1}, {'canceled':'stop'}, {'renew_on_progress':1}):
             with self.subTest(policy=policy), self.assertRaises(D.CacheError):
                 with D.wait_for_locks(**policy):pass
+
+    def test_progress_renewal_is_explicit_and_nested_helpers_cannot_enable_it(self):
+        with D.wait_for_locks(total=.1):
+            D._LOCK_WAIT.get()['remaining']=.01
+            with D.wait_for_locks(total=300,renew_on_progress=True):D._durable_copy_progress()
+            self.assertEqual(D._LOCK_WAIT.get()['remaining'],.01)
+        with D.wait_for_locks(total=.1,renew_on_progress=True):
+            D._LOCK_WAIT.get()['remaining']=.01
+            D._durable_copy_progress()
+            self.assertEqual(D._LOCK_WAIT.get()['remaining'],.1)
+        self.assertIsNone(D._LOCK_WAIT.get())
+
+    def test_progress_policy_still_times_out_without_progress(self):
+        with self.cache._locked(),ThreadPoolExecutor() as pool:
+            task=pool.submit(self.acquire,timeout=.04,total=.04,renew_on_progress=True)
+            with self.assertRaises(D.CacheBusy):task.result(timeout=2)
 
 
 if __name__ == '__main__':unittest.main()

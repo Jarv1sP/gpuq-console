@@ -30,6 +30,43 @@ OTHER = D.Principal('demo-user-2')
 
 
 class DatasetPerformance(unittest.TestCase):
+    def test_publication_resumes_after_aggregate_contention_without_recopying_completed_bytes(self):
+        version=self.register(files=60,size=80)
+        clock=[0.0];blocked=[False];copied=[]
+        real_flock=D.fcntl.flock;real_put=self.cache._put_chunk_data
+        def contend(fd,flags):
+            if not blocked[0]:
+                blocked[0]=True
+                raise BlockingIOError()
+            blocked[0]=False
+            return real_flock(fd,flags)
+        def put(*args):
+            result=real_put(*args);copied.append(result[1]);return result
+        with patch.object(D.fcntl,'flock',side_effect=contend),patch.object(D.time,'monotonic',side_effect=lambda:clock[0]),patch.object(D.time,'sleep',side_effect=lambda seconds:clock.__setitem__(0,clock[0]+seconds)),patch.object(D,'TRANSFER_BATCH_FILES',1),patch.object(self.cache,'_put_chunk_data',side_effect=put):
+            with D.wait_for_locks(timeout=.2,total=.5),self.assertRaises(D.CacheBusy):
+                self.cache.materialize(OWNER,'sample',version)
+            self.assertGreater(sum(copied),0);self.assertLess(sum(copied),60*80)
+            self.assertFalse(self.ready(version).exists())
+            blocked[0]=False
+            with D.wait_for_locks(timeout=.2,total=.5,renew_on_progress=True):
+                self.assertEqual(self.cache.materialize(OWNER,'sample',version)['state'],'READY')
+        self.assertEqual(sum(copied),60*80,'resume must not recopy complete files')
+        self.assertEqual(self.cache.status(OWNER,'sample',version)['state'],'READY')
+
+    def test_failed_checkpoint_does_not_renew_budget_or_publish_ready(self):
+        version=self.register(files=2,size=80)
+        write=D._write_json
+        def fail_checkpoint(path,value):
+            if Path(path).name=='TRANSFER.json' and value['remainingBytes']<value['totalBytes']:
+                D._LOCK_WAIT.get()['remaining']=.01
+                raise OSError('checkpoint failed')
+            return write(path,value)
+        with D.wait_for_locks(total=.5,renew_on_progress=True),patch.object(D,'TRANSFER_BATCH_FILES',1),patch.object(D,'_write_json',side_effect=fail_checkpoint):
+            with self.assertRaisesRegex(OSError,'checkpoint failed'):
+                self.cache.materialize(OWNER,'sample',version)
+            self.assertEqual(D._LOCK_WAIT.get()['remaining'],.01)
+        self.assertFalse(self.ready(version).exists())
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.base = Path(self.temp.name).resolve()

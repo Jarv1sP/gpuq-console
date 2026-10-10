@@ -235,7 +235,7 @@ class DataWorkspaces:
 
     def worker(self, user, key):
         module, _ = self.n.dataset_cache()
-        with module.wait_for_locks():
+        with module.wait_for_locks(renew_on_progress=True):
             return self._worker(user, key)
 
     def _worker(self, user, key):
