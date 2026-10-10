@@ -48,6 +48,39 @@ function fixture(t){
   return f;
 }
 
+test('same-node original confirmation is not starved by an unrelated retained copy lane',async t=>{
+  const f=fixture(t);f.user.limits[cold]=1;
+  await f.service.reconcileStorageArchive();
+  const held=f.db.prepare('SELECT archive_id FROM storage_archive_lane').get().archive_id;
+  const before=f.archive.load(held),event={id:randomUUID(),userId:f.user.id,dataset:'already-on-warehouse',version:ref.version,state:'READY'};
+  const original=f.archive.enqueueEvent(cold,event);f.calls.length=0;
+  await f.service.reconcileStorageArchive();
+  assert.equal(f.archive.load(original.id).phase,'ARCHIVED');assert.equal(f.archive.load(original.id).eventAcknowledged,true);
+  assert.equal(f.db.prepare('SELECT archive_id FROM storage_archive_lane').get().archive_id,held);
+  assert.equal(f.archive.load(held).copyKey,before.copyKey);
+  const observed=f.calls.filter(c=>c.args.dataset===event.dataset);
+  assert.deepEqual(observed.map(c=>c.op),['storage.archive.original','storage.archive.ack']);
+  assert.ok(observed.every(c=>c.machine===cold&&c.args.userId===f.user.id&&c.args.version===event.version));
+});
+
+test('independent original observation still rejects unprotected, mismatched and revoked replies',async t=>{
+  for(const outcome of ['unprotected','version-changed','revoked']){
+    const f=fixture(t);f.user.limits[cold]=1;await f.service.reconcileStorageArchive();
+    const held=f.db.prepare('SELECT archive_id FROM storage_archive_lane').get().archive_id;
+    const event={id:randomUUID(),userId:f.user.id,dataset:'original-negative',version:ref.version,state:'READY'};
+    const original=f.archive.enqueueEvent(cold,event),bridge=f.service.bridge;
+    f.service.bridge=async(machine,op,args)=>{
+      if(op!=='storage.archive.original')return bridge(machine,op,args);
+      if(outcome==='revoked')f.user.enabled=false;
+      return {...args,protected:outcome!=='unprotected',...(outcome==='version-changed'?{version:'f'.repeat(64)}:{})};
+    };
+    await f.service.reconcileStorageArchive();
+    assert.notEqual(f.archive.load(original.id).phase,'ARCHIVED');assert.equal(f.archive.load(original.id).eventAcknowledged,false);
+    assert.equal(f.db.prepare('SELECT archive_id FROM storage_archive_lane').get().archive_id,held);
+    assert.equal(f.calls.some(c=>c.op==='storage.archive.ack'&&c.args.dataset===event.dataset),false);
+  }
+});
+
 function enrollmentFixture(t){
   const f=fixture(t);f.events=[];
   f.admin={id:'demo-user-99',username:'admin',enabled:true,role:'admin',limits:{[hot]:1}};
